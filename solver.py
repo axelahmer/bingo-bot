@@ -399,7 +399,7 @@ if __name__ == '__main__':
     print(scrabble)
 
     while scrabble.get_tiles_left() > 0:
-        temp = 6 * scrabble.get_tiles_left() / 98
+        temp = 3 * scrabble.get_tiles_left() / 98
         print(f'Temperature: {temp:.2f}')
 
         row, col, word, direction = scrabble.sample_play_by_score(
