@@ -115,10 +115,18 @@ class ScrabbleBoard:
             raise ValueError(f'{word} is not in the corpus.')
 
         # Calculate score before placing the word
-        score = self.calculate_score(row, col, word, direction)
+        score, _ = self.calculate_score(row, col, word, direction)
+
+        print_word = ''
+        for i, letter in enumerate(word):
+            x,y = row + i if direction == 'down' else row, col + i if direction == 'across' else col
+            if (x,y) in self.tiles:
+                print_word += f'({letter})'
+            else:
+                print_word += letter
 
         print(
-            f'Placing {word} at ({row}, {col}) {direction} for {score} points.')
+            f'Placing {print_word} at ({row}, {col}) {direction} for {score} points.')
 
         # New tiles are the tiles that will be placed but not the tiles that are already on the board
         new_tiles = set((row + i, col) if direction == 'down' else (row, col + i)
@@ -245,7 +253,7 @@ class ScrabbleBoard:
 
                 # Check if the tile is avaliable
                 if avaliable_tiles[letter] <= 0:
-                    return -1
+                    return -1 , -1
 
                 # Otherwise use the tile
                 avaliable_tiles[letter] -= 1
@@ -286,7 +294,9 @@ class ScrabbleBoard:
 
         play_score = main_score * word_multiplier + cross_scores + bingo_bonus
 
-        return play_score
+        norm_score = play_score/num_new_tiles
+
+        return play_score, norm_score
 
     def get_cross_word_value(self, row: int, col: int, direction: str) -> int:
         # Direction to move
@@ -381,14 +391,14 @@ class ScrabbleBoard:
             words = ScrabbleBoard.solve_csp(
                 (row, col, direction, length, constraints))
             for word in words:
-                score = self.calculate_score(row, col, word, direction)
-                if score > 0:
+                score, score_norm = self.calculate_score(row, col, word, direction)
+                if score_norm > 0:
                     plays.append((row, col, word, direction))
-                    scores.append(score)
+                    scores.append(score_norm)
 
         # Normalize and sample
         scores = np.array(scores)
-        scores = np.exp(scores/(temp+1e-8))
+        scores = np.exp(scores/(temp+0.001))
         scores = scores / np.sum(scores)
         index = np.random.choice(len(scores), p=scores)
         return plays[index]
@@ -402,8 +412,10 @@ if __name__ == '__main__':
         temp = 3 * scrabble.get_tiles_left() / 98
         print(f'Temperature: {temp:.2f}')
 
+        min_new_letters = 1
+
         row, col, word, direction = scrabble.sample_play_by_score(
-            temp=temp, min_new_letters=1)
+            temp=temp, min_new_letters=min_new_letters)
         scrabble.place_word(row, col, word, direction)
         print(scrabble)
 
