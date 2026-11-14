@@ -1,0 +1,12 @@
+.{
+    .name = .bingo_bot,
+    .version = "0.1.0",
+    .fingerprint = 0xe3122c2d085331c4,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
