@@ -34,16 +34,20 @@ def load_solver():
     return solver
 
 
-def read_plays(path):
-    plays = []
+def read_turns(path):
+    """One turn per line: ROW COL across|down WORD, or pass (None)."""
+    turns = []
     with open(path) as f:
         for line in f:
             line = line.split('#', 1)[0].strip()
             if not line:
                 continue
+            if line == 'pass':
+                turns.append(None)
+                continue
             row, col, direction, word = line.split()
-            plays.append((int(row), int(col), direction, word.upper()))
-    return plays
+            turns.append((int(row), int(col), direction, word.upper()))
+    return turns
 
 
 def placement(board, row, col, word, direction):
@@ -72,19 +76,21 @@ def all_moves(board, board_cls):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('plays', nargs='?', help='file with one play per line: ROW COL across|down WORD')
-    ap.add_argument('--ply', type=int, help='use only the first PLY plays')
+    ap.add_argument('game', nargs='?', help='game file: one turn per line, ROW COL across|down WORD or pass')
+    ap.add_argument('--turns', type=int, help='use only the first TURNS turns')
     ap.add_argument('--count', action='store_true', help='print only counts and timing')
     args = ap.parse_args()
 
     solver = load_solver()
     board = solver.ScrabbleBoard()
-    plays = read_plays(args.plays) if args.plays else []
-    if args.ply is not None:
-        plays = plays[:args.ply]
+    turns = read_turns(args.game) if args.game else []
+    if args.turns is not None:
+        turns = turns[:args.turns]
     with contextlib.redirect_stdout(io.StringIO()):
-        for row, col, direction, word in plays:
-            board.place_word(row, col, word, direction)
+        for turn in turns:
+            if turn is not None:
+                row, col, direction, word = turn
+                board.place_word(row, col, word, direction)
 
     t0 = time.perf_counter()
     moves, raw = all_moves(board, solver.ScrabbleBoard)
@@ -94,7 +100,7 @@ def main():
         out = sys.stdout
         for key in sorted(moves):
             out.write(f'{key}\t{moves[key]}\n')
-    print(f'python: plies={len(plays)} moves={len(moves)} raw={raw} '
+    print(f'python: turns={len(turns)} moves={len(moves)} raw={raw} '
           f'seconds={dt:.3f}', file=sys.stderr)
 
 

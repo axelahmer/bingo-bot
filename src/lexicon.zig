@@ -7,20 +7,22 @@
 //!   bits 0..25   letters that have a child
 //!   bit  26      separator child
 //!   bit  27      accepting
-//!   bits 28..41  reach: bit d set when some path of exactly d more letters
+//!   bits 28..42  reach: bit d set when some path of exactly d more letters
 //!                ends where a word may stop (an accepting node, or before the
-//!                separator, a node with a separator child); bit 13 means
-//!                "13 or more"
-//!   bits 42..63  index of the first child record
+//!                separator, a node with a separator child). Words have at
+//!                most 15 letters, so below the root d <= 14 and 15 bits are
+//!                exact.
+//!   bits 43..63  index of the first child record (up to 2M records)
 //! Children sit contiguously in symbol order, so the child for symbol s is
 //! nodes[base + popcount(mask & ((1 << s) - 1))]. Child arrays with identical
 //! contents are stored once, which gives the minimal automaton. The record 0
 //! doubles as the dead state: no children and not accepting.
 //!
 //! The reach mask lets the move generator drop a branch as soon as no word
-//! through it can fit the free squares and the tiles left to place. Without
-//! it the leftward walk visits almost every reversed substring of the
-//! lexicon, because the bag-as-rack setting offers nearly every letter.
+//! through it can fit the free squares and the tiles left to place: with a
+//! need mask shifted into the same bit positions, that test is one AND.
+//! Without it the leftward walk visits almost every reversed substring of
+//! the lexicon, because with chosen draws nearly every letter is available.
 
 const std = @import("std");
 const rules = @import("rules.zig");
@@ -32,13 +34,13 @@ pub const LETTERS: u32 = (1 << 26) - 1;
 const SYMBOLS: u64 = (1 << 27) - 1;
 pub const ACCEPT: u64 = 1 << 27;
 pub const REACH_SHIFT = 28;
-pub const REACH_BITS = 14;
-pub const BASE_SHIFT = 42;
+pub const REACH_BITS = 15;
+pub const BASE_SHIFT = 43;
 pub const MAX_RECORDS = 1 << (64 - BASE_SHIFT);
 pub const Node = u64;
 
 const file_magic: u64 = 0x3130_4741_4444_4147; // "GADDAG01" little-endian
-const format_version: u64 = 3;
+const format_version: u64 = 4;
 
 pub inline fn letterMask(n: Node) u32 {
     return @as(u32, @truncate(n)) & LETTERS;
@@ -48,10 +50,14 @@ pub inline fn accepts(n: Node) bool {
     return n & ACCEPT != 0;
 }
 
-/// Reach mask widened to 15 bits: the saturated bit 13 also covers 14.
 pub inline fn reach(n: Node) u16 {
-    const r: u16 = @intCast((n >> REACH_SHIFT) & ((1 << REACH_BITS) - 1));
-    return r | ((r & (1 << 13)) << 1);
+    return @intCast((n >> REACH_SHIFT) & ((1 << REACH_BITS) - 1));
+}
+
+/// A need mask (bit d: a stop d letters away is usable) placed in the reach
+/// field, so `node & needBits(need) != 0` tests the two against each other.
+pub inline fn needBits(need: u16) u64 {
+    return @as(u64, need) << REACH_SHIFT;
 }
 
 inline fn base(n: Node) usize {
@@ -348,9 +354,8 @@ const Builder = struct {
             if (sym == SEP) r |= 1 else r |= @as(u32, @intCast((kid >> REACH_SHIFT) & ((1 << REACH_BITS) - 1))) << 1;
             lo = j;
         }
-        // Saturate: bit 13 stands for every distance of 13 or more.
-        if (r >> 13 != 0) r = (r & ((1 << 13) - 1)) | (1 << 13);
-        rec |= @as(u64, r) << REACH_SHIFT;
+        // Only the root can reach 15 letters away, and nothing asks for it.
+        rec |= @as(u64, r & ((1 << REACH_BITS) - 1)) << REACH_SHIFT;
         if (nk > 0) {
             const off = try self.intern(kids[0..nk]);
             if (off >= MAX_RECORDS) return error.LexiconTooLarge;

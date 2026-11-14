@@ -43,15 +43,37 @@ pub const standard_counts = [27]u8{
     2,
 };
 
-/// Rule knobs that differ between the 2023 Python reference and a full game.
-pub const Rules = struct {
-    /// Blanks in the bag. The Python reference ignores blanks, so 0 matches it.
-    blanks: u8 = 0,
-    /// Most tiles one play may place (the rack size).
-    rack: u8 = 7,
-    /// Bonus for placing exactly `rack` tiles.
-    bingo: i32 = 50,
+/// How the end-of-game rack adjustment works when a player goes out.
+pub const EndRule = enum {
+    /// WESPA (the rules that go with Collins/SOWPODS): the player who goes
+    /// out gains the value of the opponent's rack, and the opponent loses it.
+    wespa,
+    /// NASPA: the player who goes out gains twice the opponent's rack value.
+    naspa,
 };
+
+/// The rules of a game. The defaults are a standard two-player game; the
+/// 2023 Python reference is `.{ .players = 1, .blanks = 0 }`.
+pub const Rules = struct {
+    /// Players taking turns. 1 is solitaire.
+    players: u8 = 2,
+    /// Blanks in the bag (the standard set has 2).
+    blanks: u8 = 2,
+    /// Rack size: tiles drawn at the start and refilled after each play.
+    rack: u8 = 7,
+    /// Bonus for placing all `rack` tiles in one play.
+    bingo: i32 = 50,
+    /// This many consecutive scoreless turns end the game.
+    scoreless_limit: u8 = 6,
+    end_rule: EndRule = .wespa,
+};
+
+/// Total face value of a set of tile counts (blanks are worth nothing).
+pub fn countsValue(counts: *const [27]u8) i32 {
+    var v: i32 = 0;
+    for (counts[0..26], letter_values) |n, lv| v += @as(i32, n) * lv;
+    return v;
+}
 
 /// Standard premium layout. '.' plain, 'd' double letter, 't' triple letter,
 /// 'D' double word, 'T' triple word.

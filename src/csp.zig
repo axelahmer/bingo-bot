@@ -127,8 +127,8 @@ pub const Csp = struct {
     cons: [N]u32,
 };
 
-/// get_csps.
-pub fn collectCsps(gpa: Allocator, pos: *const Position, halo: *const Halo, r: rules.Rules, out: *std.ArrayList(Csp)) !void {
+/// get_csps. A slot may hold at most `max_new` empty squares.
+pub fn collectCsps(gpa: Allocator, pos: *const Position, halo: *const Halo, max_new: usize, out: *std.ArrayList(Csp)) !void {
     for (0..2) |dd| {
         const d: u1 = @intCast(dd);
         for (0..N) |row| {
@@ -153,7 +153,7 @@ pub fn collectCsps(gpa: Allocator, pos: *const Position, halo: *const Halo, r: r
                     if (d == 0) y += 1 else x += 1;
                     i += 1;
                     const next_is_tile = x < N and y < N and pos.at(x, y) != 0;
-                    if (!next_is_tile and halo_hit and new_count >= 1 and new_count <= r.rack and i > 1) {
+                    if (!next_is_tile and halo_hit and new_count >= 1 and new_count <= max_new and i > 1) {
                         p.len = @intCast(i);
                         try out.append(gpa, p);
                     }
@@ -172,10 +172,11 @@ pub fn generate(
     pos: *const Position,
     halo: *const Halo,
     r: rules.Rules,
+    sup: movegen.Supply,
 ) !void {
     var csps: std.ArrayList(Csp) = .empty;
     defer csps.deinit(gpa);
-    try collectCsps(gpa, pos, halo, r, &csps);
+    try collectCsps(gpa, pos, halo, @min(r.rack, sup.max_tiles), &csps);
     for (csps.items) |*p| {
         const n: usize = p.len;
         const words = ws.by_len[n];
@@ -185,13 +186,13 @@ pub fn generate(
             for (w, 0..) |l, i| {
                 if ((p.cons[i] >> @intCast(l)) & 1 == 0) continue :next;
             }
-            emitScored(V, visitor, pos, p, w, r);
+            emitScored(V, visitor, pos, p, w, r, &sup.counts);
         }
     }
 }
 
 /// calculate_score, generalised to try each way of covering new tiles with blanks.
-fn emitScored(comptime V: type, visitor: *V, pos: *const Position, p: *const Csp, w: []const u8, r: rules.Rules) void {
+fn emitScored(comptime V: type, visitor: *V, pos: *const Position, p: *const Csp, w: []const u8, r: rules.Rules, supply: *const [27]u8) void {
     const d = p.dir;
     const line: usize = if (d == 0) p.row else p.col;
     const start: usize = if (d == 0) p.col else p.row;
@@ -203,22 +204,22 @@ fn emitScored(comptime V: type, visitor: *V, pos: *const Position, p: *const Csp
             k += 1;
         }
     }
-    const blanks = pos.bag[rules.BLANK_SLOT];
+    const blanks = supply[rules.BLANK_SLOT];
     const subsets = @as(u32, 1) << @intCast(k);
     var s: u32 = 0;
     while (s < subsets) : (s += 1) {
         if (@popCount(s) > blanks) continue;
-        // Natural tiles must be in the bag.
-        var bag = pos.bag;
+        // Natural tiles must be in the supply.
+        var left = supply.*;
         var ok = true;
         for (0..k) |j| {
             if ((s >> @intCast(j)) & 1 != 0) continue;
             const l = w[new_idx[j]];
-            if (bag[l] == 0) {
+            if (left[l] == 0) {
                 ok = false;
                 break;
             }
-            bag[l] -= 1;
+            left[l] -= 1;
         }
         if (!ok) continue;
 

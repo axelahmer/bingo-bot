@@ -1,7 +1,7 @@
-//! Game state: the board stored in both orientations (so every line, across
+//! Board state: the board stored in both orientations (so every line, across
 //! or down, is a contiguous 15-byte slice), per-square cross-check sets, and
-//! the bag. In this solitaire model the whole bag is the rack: a play may use
-//! any tiles still in the bag, up to `Rules.rack` of them.
+//! the pool of unplayed tiles (the bag plus every rack). Turns, racks and
+//! the end of the game live in game.zig.
 
 const std = @import("std");
 const rules = @import("rules.zig");
@@ -94,8 +94,9 @@ pub const Position = struct {
     xmask: [2][NN]u32,
     /// Face value of the tiles in that perpendicular word.
     xsum: [2][NN]u16,
-    bag: [27]u8,
-    bag_total: u8,
+    /// Unplayed tiles (bag and racks) by letter; index 26 counts blanks.
+    pool: [27]u8,
+    pool_total: u8,
     initial_total: u8,
     tiles_on_board: u8,
     score: i32,
@@ -106,12 +107,12 @@ pub const Position = struct {
         p.cells = @splat(@splat(0));
         p.xmask = @splat(@splat(ALL_LETTERS));
         p.xsum = @splat(@splat(0));
-        p.bag = rules.standard_counts;
-        p.bag[rules.BLANK_SLOT] = r.blanks;
+        p.pool = rules.standard_counts;
+        p.pool[rules.BLANK_SLOT] = r.blanks;
         var total: u32 = 0;
-        for (p.bag) |n| total += n;
-        p.bag_total = @intCast(total);
-        p.initial_total = p.bag_total;
+        for (p.pool) |n| total += n;
+        p.pool_total = @intCast(total);
+        p.initial_total = p.pool_total;
         p.tiles_on_board = 0;
         p.score = 0;
         p.plies = 0;
@@ -150,9 +151,9 @@ pub const Position = struct {
             const c = m.tiles[i];
             self.cells[d][line * N + i] = c;
             self.cells[p][i * N + line] = c;
-            self.bag[if (rules.isBlank(c)) rules.BLANK_SLOT else rules.letterOf(c)] -= 1;
+            self.pool[if (rules.isBlank(c)) rules.BLANK_SLOT else rules.letterOf(c)] -= 1;
         }
-        self.bag_total -= m.placed;
+        self.pool_total -= m.placed;
         self.tiles_on_board += m.placed;
         self.score += m.score;
         self.plies += 1;
@@ -263,7 +264,7 @@ pub const Position = struct {
             .start = @intCast(start),
             .end = @intCast(start + word.len - 1),
         };
-        var bag = self.bag;
+        var pool = self.pool;
         var cells: [N]u8 = undefined;
         for (word, 0..) |ch, k| {
             if (!std.ascii.isAlphabetic(ch)) return error.BadWord;
@@ -277,8 +278,8 @@ pub const Position = struct {
             }
             const blank = std.ascii.isLower(ch);
             const slot: usize = if (blank) rules.BLANK_SLOT else l;
-            if (bag[slot] == 0) return error.NotInBag;
-            bag[slot] -= 1;
+            if (pool[slot] == 0) return error.NotInBag;
+            pool[slot] -= 1;
             m.tiles[i] = rules.cellOf(l, blank);
             m.new_mask |= @as(u16, 1) << @intCast(i);
             m.placed += 1;
@@ -345,8 +346,6 @@ pub const Position = struct {
             }
             try w.writeByte('\n');
         }
-        try w.print("score {d}  plies {d}  tiles on board {d}  left in bag {d}\n", .{
-            self.score, self.plies, self.tiles_on_board, self.bag_total,
-        });
+        try w.print("tiles on board {d}, unplayed {d}\n", .{ self.tiles_on_board, self.pool_total });
     }
 };

@@ -1,4 +1,5 @@
-//! GADDAG move generation (Gordon 1994) adapted to the bag-as-rack setting.
+//! GADDAG move generation (Gordon 1994) for plays drawn from a large supply
+//! of tiles (with chosen draws, any unplayed tile can be on the rack).
 //!
 //! Every play is walked from one pivot square: the rightmost square of its
 //! main word that is constrained, meaning it holds a tile or has a
@@ -6,12 +7,13 @@
 //! leftwards, then (after the separator) rightwards. Everything right of the
 //! pivot is open board, so all constraints are met before the walk enters
 //! unconstrained squares. Each play has exactly one pivot, so it is produced
-//! once. (Gordon's leftmost-anchor rule enumerates open space first, which
-//! is cheap with a 7-tile rack but wasteful when the whole bag is the rack.)
+//! once. (The usual leftmost-anchor rule enumerates open space first, which
+//! is cheap with a 7-tile rack but wasteful with this many tiles to choose
+//! from.)
 //!
 //! At each empty square the letters worth trying are one AND away:
 //!
-//!     candidates = node.children & square.cross_check & bag.non_empty
+//!     candidates = node.children & square.cross_check & supply.non_empty
 //!
 //! and a child is entered only if its reach mask says some word through it
 //! fits the free squares and the tiles left to place. Scores are
@@ -19,6 +21,12 @@
 //! and plays go to a comptime visitor that can count, collect, or sample
 //! them without storing every play. A one-tile play that forms words both
 //! ways is reported only by the across pass.
+//!
+//! Blanks are not walked. The walk chooses letters only, and counts how
+//! many of them the natural tiles cannot cover. When a play is recorded,
+//! each legal way of making some of its tiles blanks is reported, with the
+//! points each blank loses subtracted. Walking blank choices directly
+//! repeats the same GADDAG paths for every subset of blank positions.
 
 const std = @import("std");
 const rules = @import("rules.zig");
@@ -39,6 +47,8 @@ pub const Candidate = struct {
     start: u8,
     end: u8,
     new_mask: u16,
+    /// Line positions of new tiles that are blanks; `tiles` holds natural cells.
+    blanks: u16 = 0,
     tiles: *const [N]u8,
 
     pub fn toMove(c: *const Candidate) Move {
@@ -54,32 +64,77 @@ pub const Candidate = struct {
         var it = c.new_mask;
         while (it != 0) : (it &= it - 1) {
             const i: usize = @ctz(it);
-            m.tiles[i] = c.tiles[i];
+            m.tiles[i] = c.tiles[i] | (if ((c.blanks >> @intCast(i)) & 1 != 0) rules.BLANK_FLAG else 0);
         }
         return m;
     }
 };
 
-/// Generate every legal play in `pos`, calling `visitor.visit(*const Candidate)`.
-pub fn generate(comptime V: type, visitor: *V, pos: *const Position, lex: *const lexicon.Lexicon, r: rules.Rules) void {
+pub const BlankMode = enum {
+    /// Every legal way of using blanks: the full move set.
+    any,
+    /// Blanks only where no natural tile is left, and no more than needed.
+    as_needed,
+};
+
+/// The tiles a play may be made from.
+pub const Supply = struct {
+    /// Tiles by letter; index 26 counts blanks.
+    counts: [27]u8,
+    /// Most tiles one play may place (the mover's rack size).
+    max_tiles: u8,
+    blanks: BlankMode = .any,
+};
+
+/// Generate every legal play in `pos` from `sup`, calling
+/// `visitor.visit(*const Candidate)` once per play.
+pub fn generate(
+    comptime V: type,
+    visitor: *V,
+    pos: *const Position,
+    lex: *const lexicon.Lexicon,
+    r: rules.Rules,
+    sup: Supply,
+) void {
+    if (sup.counts[rules.BLANK_SLOT] != 0) {
+        run(V, true, visitor, pos, lex, r, sup);
+    } else {
+        run(V, false, visitor, pos, lex, r, sup);
+    }
+}
+
+fn run(
+    comptime V: type,
+    comptime with_blanks: bool,
+    visitor: *V,
+    pos: *const Position,
+    lex: *const lexicon.Lexicon,
+    r: rules.Rules,
+    sup: Supply,
+) void {
     std.debug.assert(r.rack <= N);
-    var g = Generator(V){
+    const max_place = @min(r.rack, sup.max_tiles);
+    if (max_place == 0) return;
+    var g = Generator(V, with_blanks){
         .visitor = visitor,
         .nodes = lex.nodes.ptr,
         .rack = r.rack,
-        .max_place = @min(r.rack, pos.bag_total),
-        .bag = pos.bag,
-        .avail = 0,
+        .max_place = max_place,
+        .blanks = sup.counts[rules.BLANK_SLOT],
+        .only_needed = sup.blanks == .as_needed,
     };
     for (0..26) |l| {
-        if (pos.bag[l] != 0) g.avail |= @as(u32, 1) << @intCast(l);
+        g.left[l] = @intCast(sup.counts[l]);
+        if (sup.counts[l] != 0) g.avail |= @as(u32, 1) << @intCast(l);
     }
-    g.bingo = @splat(0);
     g.bingo[r.rack] = r.bingo;
-    if (g.max_place == 0) return;
     const root = lex.root();
+    // The board is symmetric about its diagonal, so on the empty board every
+    // down play mirrors an across play with the same score: walk across
+    // only and report each play in both directions.
     const first_play = pos.tiles_on_board == 0;
-    for (0..2) |d| {
+    g.mirror = first_play;
+    for (0..@as(usize, if (first_play) 1 else 2)) |d| {
         for (0..N) |line| {
             if (first_play and line != rules.CENTER) continue;
             g.loadLine(pos, @intCast(d), line, first_play);
@@ -89,12 +144,10 @@ pub fn generate(comptime V: type, visitor: *V, pos: *const Position, lex: *const
                 g.setPivot(p);
                 const c = g.cells[p];
                 if (c == 0) {
-                    g.fill(true, p, root, 0, 0);
+                    g.fillLeft(p, root, 0);
                 } else {
-                    const ch = g.child(root, rules.letterOf(c));
-                    if (lexicon.reach(ch) & g.needLeft(p, g.max_place) != 0) {
-                        g.left(p, ch, @intCast(rules.cellValue(c)));
-                    }
+                    // The pivot ends a run of tiles; afterLeft reads the rest.
+                    g.afterLeft(p, g.child(root, rules.letterOf(c)), @intCast(rules.cellValue(c)));
                 }
             }
         }
@@ -115,11 +168,25 @@ const DW_SHIFT = 40;
 const TW_SHIFT = 48;
 const pow3 = [8]i32{ 1, 3, 9, 27, 81, 243, 729, 2187 };
 
+/// Index pairs (j1 < j2), ordered by j2 then j1, so the pairs among the
+/// first k items are exactly the first k(k-1)/2 entries.
+const pairs: [N * (N - 1) / 2][2]u8 = blk: {
+    var out: [N * (N - 1) / 2][2]u8 = undefined;
+    var n: usize = 0;
+    for (1..N) |j2| {
+        for (0..j2) |j1| {
+            out[n] = .{ j1, j2 };
+            n += 1;
+        }
+    }
+    break :blk out;
+};
+
 inline fn placedOf(acc: Acc) usize {
     return @intCast((acc >> PLACED_SHIFT) & 0xff);
 }
 
-fn Generator(comptime V: type) type {
+fn Generator(comptime V: type, comptime with_blanks: bool) type {
     return struct {
         const Self = @This();
 
@@ -127,10 +194,18 @@ fn Generator(comptime V: type) type {
         nodes: [*]const u64,
         rack: u8,
         max_place: u8,
-        bingo: [N + 1]i32 = undefined,
-        bag: [27]u8,
-        /// Bit l set while the bag still holds a natural tile l.
-        avail: u32,
+        bingo: [N + 1]i32 = @splat(0),
+        /// Natural tiles of each letter not used by the current partial play;
+        /// negative when blanks stand in.
+        left: [26]i8 = @splat(0),
+        /// Bit l set while left[l] > 0. Kept up to date bit by bit: reading
+        /// `left` as a vector right after a one-byte store would stall on
+        /// store forwarding.
+        avail: u32 = 0,
+        blanks: u8,
+        /// Tiles in the current partial play that must be blanks.
+        deficit: u8 = 0,
+        only_needed: bool,
 
         // The current line.
         dir: u1 = 0,
@@ -149,6 +224,8 @@ fn Generator(comptime V: type) type {
         xflag: [N]u64 = undefined,
         /// One placed tile plus the square's word premium, as an Acc delta.
         dbase: [N]u64 = undefined,
+        /// dtab[i][l]: the whole Acc delta for a natural tile l on square i.
+        dtab: [N][26]u64 = undefined,
         /// Bit e set when a word may end at e (next square empty or edge).
         end_ok: u16 = 0,
         /// Bit s set when a word may start at s (previous square empty or edge).
@@ -157,6 +234,11 @@ fn Generator(comptime V: type) type {
         lfit: [N][N + 1]u16 = undefined,
         /// rfit[i][b]: distances d for which squares i+1 .. i+d hold at most b empties.
         rfit: [N][N + 1]u16 = undefined,
+        /// For the current pivot, needl[i][b] / needr[i][b]: the distances to
+        /// a usable word start / end going left / right from square i with b
+        /// tiles still to place (see needLeft / needRight).
+        needl: [N][N + 1]u16 = undefined,
+        needr: [N][N + 1]u16 = undefined,
 
         // The current pivot.
         pivot: usize = 0,
@@ -164,13 +246,21 @@ fn Generator(comptime V: type) type {
         /// Last square the rightward walk may fill (the square before the
         /// next constrained one).
         hi: usize = 0,
-        /// Usable word starts at or left of the pivot, bit-reversed: bit (15 - s).
-        lstart_rev: u16 = 0,
-        /// Usable word ends from the pivot to `hi`.
-        rend: u16 = 0,
 
         tiles: [N]u8 = @splat(0),
         new_mask: u16 = 0,
+        /// Report each play again as its mirror image (empty board only).
+        mirror: bool = false,
+
+        /// Hand a play to the visitor (and its mirror image, on the empty board).
+        inline fn emit(self: *Self, cand: *Candidate) void {
+            self.visitor.visit(cand);
+            if (self.mirror) {
+                cand.dir = 1;
+                self.visitor.visit(cand);
+                cand.dir = 0;
+            }
+        }
 
         fn loadLine(self: *Self, pos: *const Position, d: u1, line: usize, first_play: bool) void {
             const base = line * N;
@@ -181,17 +271,7 @@ fn Generator(comptime V: type) type {
             var cross: u16 = 0;
             for (0..N) |i| {
                 const xm = pos.xmask[d][base + i];
-                const wm = rules.premiums.word[d][base + i];
                 self.xm[i] = xm;
-                self.lmul[i] = rules.premiums.letter[d][base + i];
-                self.wmul[i] = wm;
-                self.xsum[i] = pos.xsum[d][base + i];
-                self.xflag[i] = if (xm & board.HAS_CROSS != 0) ~@as(u64, 0) else 0;
-                self.dbase[i] = (@as(u64, 1) << PLACED_SHIFT) | switch (wm) {
-                    2 => @as(u64, 1) << DW_SHIFT,
-                    3 => @as(u64, 1) << TW_SHIFT,
-                    else => 0,
-                };
                 const bit = @as(u16, 1) << @intCast(i);
                 if (self.cells[i] == 0) {
                     empty |= bit;
@@ -210,15 +290,33 @@ fn Generator(comptime V: type) type {
                 self.pivots = self.constrained & ~(occ >> 1);
             }
             if (self.pivots == 0) return;
+            for (0..N) |i| {
+                const wm = rules.premiums.word[d][base + i];
+                self.lmul[i] = rules.premiums.letter[d][base + i];
+                self.wmul[i] = wm;
+                self.xsum[i] = pos.xsum[d][base + i];
+                self.xflag[i] = if (self.xm[i] & board.HAS_CROSS != 0) ~@as(u64, 0) else 0;
+                self.dbase[i] = (@as(u64, 1) << PLACED_SHIFT) | switch (wm) {
+                    2 => @as(u64, 1) << DW_SHIFT,
+                    3 => @as(u64, 1) << TW_SHIFT,
+                    else => 0,
+                };
+            }
+            var e = empty;
+            while (e != 0) : (e &= e - 1) {
+                const i: usize = @ctz(e);
+                for (0..26) |l| self.dtab[i][l] = self.delta(i, rules.letter_values[l]);
+            }
             const edge: u16 = 1 << (N - 1);
             self.end_ok = (empty >> 1) | edge;
             self.start_ok = (empty << 1 | 1) & ((1 << N) - 1);
+            // Only budgets up to max_place are ever asked for.
             for (0..N) |i| {
                 var dl: usize = 0;
                 var cl: usize = 0;
                 var dr: usize = 0;
                 var cr: usize = 0;
-                for (0..N + 1) |b| {
+                for (0..@as(usize, self.max_place) + 1) |b| {
                     while (dl < i and cl + ((empty >> @intCast(i - dl - 1)) & 1) <= b) {
                         cl += (empty >> @intCast(i - dl - 1)) & 1;
                         dl += 1;
@@ -240,18 +338,30 @@ fn Generator(comptime V: type) type {
             const above = self.constrained & ~upto;
             self.hi = if (above == 0) N - 1 else @as(usize, @ctz(above)) - 1;
             const thru_hi: u16 = @intCast((@as(u32, 2) << @intCast(self.hi)) - 1);
-            self.lstart_rev = @bitReverse(self.start_ok & upto);
-            self.rend = self.end_ok & thru_hi & ~(upto >> 1);
+            const lstart_rev = @bitReverse(self.start_ok & upto);
+            const rend = self.end_ok & thru_hi & ~(upto >> 1);
+            for (0..p + 1) |i| {
+                for (0..@as(usize, self.max_place) + 1) |b| {
+                    self.needl[i][b] = (lstart_rev >> @intCast(15 - i)) & self.lfit[i][b];
+                }
+            }
+            for (p..self.hi + 1) |i| {
+                for (0..@as(usize, self.max_place) + 1) |b| {
+                    self.needr[i][b] = (rend >> @intCast(i)) & self.rfit[i][b];
+                }
+            }
         }
 
-        /// Word lengths still to come, going left from i, that end at a usable start.
+        /// Distances d (going left from i) to a usable word start that the
+        /// remaining `budget` of tiles can reach.
         inline fn needLeft(self: *const Self, i: usize, budget: usize) u16 {
-            return (self.lstart_rev >> @intCast(15 - i)) & self.lfit[i][budget];
+            return self.needl[i][budget];
         }
 
-        /// Word lengths still to come, going right from i, that end at a usable end.
+        /// Distances d (going right from i) to a usable word end that the
+        /// remaining `budget` of tiles can reach.
         inline fn needRight(self: *const Self, i: usize, budget: usize) u16 {
-            return (self.rend >> @intCast(i)) & self.rfit[i][budget];
+            return self.needr[i][budget];
         }
 
         /// Child of `n` for `sym`, or the dead record 0. Branch-free: the
@@ -263,14 +373,43 @@ fn Generator(comptime V: type) type {
             return if (m & bit != 0) rec else 0;
         }
 
-        inline fn take(self: *Self, l: u5) void {
-            self.bag[l] -= 1;
-            self.avail &= ~(@as(u32, @intFromBool(self.bag[l] == 0)) << l);
+        inline fn use(self: *Self, l: u5) void {
+            const v = self.left[l] - 1;
+            self.left[l] = v;
+            self.avail &= ~(@as(u32, @intFromBool(v <= 0)) << l);
+            if (with_blanks) self.deficit += @intFromBool(v < 0);
         }
 
-        inline fn give(self: *Self, l: u5) void {
-            self.bag[l] += 1;
-            self.avail |= @as(u32, 1) << l;
+        inline fn unuse(self: *Self, l: u5) void {
+            const v = self.left[l];
+            if (with_blanks) self.deficit -= @intFromBool(v < 0);
+            self.left[l] = v + 1;
+            self.avail |= @as(u32, @intFromBool(v + 1 > 0)) << l;
+        }
+
+        /// Letters worth trying on empty square i under GADDAG node `node`.
+        inline fn candidates(self: *const Self, node: u64, i: usize) u32 {
+            const allowed = lexicon.letterMask(node) & self.xm[i];
+            if (with_blanks and self.deficit < self.blanks) return allowed;
+            return allowed & self.avail;
+        }
+
+        /// Load the children of `node` for `cand` into `kids` and return the
+        /// letters whose child can still finish a word within `need`.
+        /// Branch-free apart from the loop itself.
+        inline fn screen(self: *const Self, node: u64, cand: u32, need: u16, kids: *[26]u64) u32 {
+            const m: u32 = @truncate(node & ((1 << 27) - 1));
+            const base: usize = @intCast(node >> lexicon.BASE_SHIFT);
+            const want = lexicon.needBits(need);
+            var pass: u32 = 0;
+            var it = cand;
+            while (it != 0) : (it &= it - 1) {
+                const l: u5 = @intCast(@ctz(it));
+                const ch = self.nodes[base + @popCount(m & ((@as(u32, 1) << l) - 1))];
+                kids[l] = ch;
+                pass |= @as(u32, @intFromBool(ch & want != 0)) << l;
+            }
+            return pass;
         }
 
         /// Acc delta for placing a tile worth `value` at square i.
@@ -280,67 +419,44 @@ fn Generator(comptime V: type) type {
             return self.dbase[i] + lv + (cross << CROSS_SHIFT);
         }
 
-        /// Try each letter on the empty square i and continue the walk.
-        inline fn fill(self: *Self, comptime leftward: bool, i: usize, node: u64, acc: Acc, start: usize) void {
-            const placed = placedOf(acc);
-            if (placed >= self.max_place) return;
-            const allowed = lexicon.letterMask(node) & self.xm[i];
-            const blanks = self.bag[rules.BLANK_SLOT] != 0;
-            const cand = if (blanks) allowed else allowed & self.avail;
+        /// Place each worthwhile letter on the empty square i (at or left of
+        /// the pivot) and continue the walk. The caller has checked that a
+        /// tile can still be placed.
+        fn fillLeft(self: *Self, i: usize, node: u64, acc: Acc) void {
+            const cand = self.candidates(node, i);
             if (cand == 0) return;
-            const budget = self.max_place - placed - 1;
-            const need = if (leftward) self.needLeft(i, budget) else self.needRight(i, budget);
-
-            // First pass, branch-free: which children can still finish a word?
+            const need = self.needLeft(i, self.max_place - placedOf(acc) - 1);
             var kids: [26]u64 = undefined;
-            var pass: u32 = 0;
-            const m: u32 = @truncate(node & ((1 << 27) - 1));
-            const base: usize = @intCast(node >> lexicon.BASE_SHIFT);
-            var it = cand;
-            while (it != 0) : (it &= it - 1) {
-                const l: u5 = @intCast(@ctz(it));
-                const ch = self.nodes[base + @popCount(m & ((@as(u32, 1) << l) - 1))];
-                kids[l] = ch;
-                pass |= @as(u32, @intFromBool(lexicon.reach(ch) & need != 0)) << l;
-            }
+            const pass = self.screen(node, cand, need, &kids);
             if (pass == 0) return;
-
             const bit = @as(u16, 1) << @intCast(i);
             self.new_mask |= bit;
-            it = pass & self.avail;
+            var it = pass;
             while (it != 0) : (it &= it - 1) {
                 const l: u5 = @intCast(@ctz(it));
-                self.take(l);
+                self.use(l);
                 self.tiles[i] = rules.cellOf(l, false);
-                const a = acc + self.delta(i, rules.letter_values[l]);
-                if (leftward) self.left(i, kids[l], a) else self.right(i, kids[l], a, start);
-                self.give(l);
-            }
-            if (blanks) {
-                self.bag[rules.BLANK_SLOT] -= 1;
-                const a = acc + self.delta(i, 0);
-                it = pass;
-                while (it != 0) : (it &= it - 1) {
-                    const l: u5 = @intCast(@ctz(it));
-                    self.tiles[i] = rules.cellOf(l, true);
-                    if (leftward) self.left(i, kids[l], a) else self.right(i, kids[l], a, start);
-                }
-                self.bag[rules.BLANK_SLOT] += 1;
+                self.afterLeft(i, kids[l], acc + self.dtab[i][l]);
+                self.unuse(l);
             }
             self.tiles[i] = 0;
             self.new_mask &= ~bit;
         }
 
         /// Square i (at or left of the pivot) holds the walk's latest letter.
-        fn left(self: *Self, i: usize, node: u64, acc: Acc) void {
-            if (i > 0 and self.cells[i - 1] != 0) {
-                // A tile to the left must join the word.
-                const c = self.cells[i - 1];
-                const ch = self.child(node, rules.letterOf(c));
-                if (lexicon.reach(ch) & self.needLeft(i - 1, self.max_place - placedOf(acc)) == 0) return;
-                self.left(i - 1, ch, acc + @as(u64, @intCast(rules.cellValue(c))));
-                return;
+        inline fn afterLeft(self: *Self, at: usize, at_node: u64, at_acc: Acc) void {
+            var i = at;
+            var node = at_node;
+            var acc = at_acc;
+            // A run of tiles to the left must join the word.
+            while (i > 0 and self.cells[i - 1] != 0) {
+                i -= 1;
+                node = self.child(node, rules.letterOf(self.cells[i]));
+                acc += @intCast(rules.cellValue(self.cells[i]));
             }
+            const budget = self.max_place - placedOf(acc);
+            const need = self.needLeft(i, budget);
+            if (node & lexicon.needBits(need) == 0) return;
             // The word may start at i and end at the pivot ...
             if (self.pivot_right_free and lexicon.accepts(node) and placedOf(acc) != 0) {
                 self.record(i, self.pivot, acc);
@@ -348,18 +464,60 @@ fn Generator(comptime V: type) type {
             // ... or start at i and run on into the open squares right of the pivot ...
             if (self.pivot < self.hi) {
                 const sep = self.child(node, lexicon.SEP);
-                if (lexicon.reach(sep) & self.needRight(self.pivot, self.max_place - placedOf(acc)) != 0) {
-                    self.fill(false, self.pivot + 1, sep, acc, i);
+                if (sep & lexicon.needBits(self.needRight(self.pivot, budget)) != 0) {
+                    self.fillRight(self.pivot + 1, sep, acc, i);
                 }
             }
-            // ... or keep growing left.
-            if (i > 0) self.fill(true, i - 1, node, acc, 0);
+            // ... or start further left.
+            if (node & lexicon.needBits(need & ~@as(u16, 1)) != 0) self.fillLeft(i - 1, node, acc);
         }
 
-        /// Square i (an open square right of the pivot) holds the walk's latest letter.
-        fn right(self: *Self, i: usize, node: u64, acc: Acc, start: usize) void {
-            if (lexicon.accepts(node) and (self.end_ok >> @intCast(i)) & 1 != 0) self.record(start, i, acc);
-            if (i < self.hi) self.fill(false, i + 1, node, acc, start);
+        /// Place each worthwhile letter on the open square i (right of the
+        /// pivot), record the words that end there, and continue right.
+        fn fillRight(self: *Self, i: usize, node: u64, acc: Acc, start: usize) void {
+            const cand = self.candidates(node, i);
+            if (cand == 0) return;
+            const need = self.needRight(i, self.max_place - placedOf(acc) - 1);
+            var kids: [26]u64 = undefined;
+            const pass = self.screen(node, cand, need, &kids);
+            if (pass == 0) return;
+            const ends_here = need & 1 != 0;
+            const onward = need & ~@as(u16, 1);
+            const onward_bits = lexicon.needBits(onward);
+            const bit = @as(u16, 1) << @intCast(i);
+            self.new_mask |= bit;
+            var it = pass;
+            if (onward == 0) {
+                // No word can go past this square, so `need` is just "ends
+                // here" and every passing child is a finished play. Only the
+                // blank expansion still looks at the letter counts.
+                while (it != 0) : (it &= it - 1) {
+                    const l: u5 = @intCast(@ctz(it));
+                    self.tiles[i] = rules.cellOf(l, false);
+                    if (with_blanks) {
+                        self.left[l] -= 1;
+                        self.deficit += @intFromBool(self.left[l] < 0);
+                    }
+                    self.record(start, i, acc + self.dtab[i][l]);
+                    if (with_blanks) {
+                        self.deficit -= @intFromBool(self.left[l] < 0);
+                        self.left[l] += 1;
+                    }
+                }
+            } else {
+                while (it != 0) : (it &= it - 1) {
+                    const l: u5 = @intCast(@ctz(it));
+                    const ch = kids[l];
+                    self.use(l);
+                    self.tiles[i] = rules.cellOf(l, false);
+                    const a = acc + self.dtab[i][l];
+                    if (ends_here and lexicon.accepts(ch)) self.record(start, i, a);
+                    if (ch & onward_bits != 0) self.fillRight(i + 1, ch, a, start);
+                    self.unuse(l);
+                }
+            }
+            self.tiles[i] = 0;
+            self.new_mask &= ~bit;
         }
 
         inline fn record(self: *Self, start: usize, end: usize, acc: Acc) void {
@@ -370,8 +528,9 @@ fn Generator(comptime V: type) type {
             const cross: i32 = @intCast((acc >> CROSS_SHIFT) & 0xffff);
             const dw: u5 = @intCast((acc >> DW_SHIFT) & 0xff);
             const tw: usize = @intCast((acc >> TW_SHIFT) & 0xff);
-            const cand = Candidate{
-                .score = (main << dw) * pow3[tw] + cross + self.bingo[placed],
+            const word_mult = (@as(i32, 1) << dw) * pow3[tw];
+            var cand = Candidate{
+                .score = main * word_mult + cross + self.bingo[placed],
                 .placed = @intCast(placed),
                 .dir = self.dir,
                 .line = self.line,
@@ -380,7 +539,128 @@ fn Generator(comptime V: type) type {
                 .new_mask = self.new_mask,
                 .tiles = &self.tiles,
             };
-            self.visitor.visit(&cand);
+            if (with_blanks) self.expandBlanks(&cand, word_mult) else self.emit(&cand);
+        }
+
+        /// Report every legal way of making some of the play's tiles blanks.
+        /// Tiles whose letter the natural supply cannot cover must be blanks;
+        /// with `.any`, other tiles may be blanks too, up to the blanks there are.
+        fn expandBlanks(self: *Self, cand: *Candidate, word_mult: i32) void {
+            var at: [N]u8 = undefined;
+            var letter: [N]u5 = undefined;
+            // Points lost if that tile is a blank: its letter points in the
+            // main word, and in its perpendicular word if it makes one.
+            var loss: [N]i32 = undefined;
+            var k: usize = 0;
+            var it = self.new_mask;
+            while (it != 0) : (it &= it - 1) {
+                const i: usize = @ctz(it);
+                const l = rules.letterOf(self.tiles[i]);
+                const lv = @as(i32, rules.letter_values[l]) * @as(i32, @intCast(self.lmul[i]));
+                var lost = lv * word_mult;
+                if (self.xflag[i] != 0) lost += lv * @as(i32, @intCast(self.wmul[i]));
+                at[k] = @intCast(i);
+                letter[k] = l;
+                loss[k] = lost;
+                k += 1;
+            }
+            // Letters needing a blank, with repeats.
+            var short: [N]u5 = undefined;
+            var ns: usize = 0;
+            if (self.deficit != 0) {
+                var seen: u32 = 0;
+                for (letter[0..k]) |l| {
+                    if ((seen >> l) & 1 != 0) continue;
+                    seen |= @as(u32, 1) << l;
+                    var d: i32 = -@as(i32, self.left[l]);
+                    while (d > 0) : (d -= 1) {
+                        short[ns] = l;
+                        ns += 1;
+                    }
+                }
+            }
+            const base_score = cand.score;
+            const most = @min(self.blanks, k);
+            if (most > 2) return self.expandMany(cand, at[0..k], letter[0..k], loss[0..k], short[0..ns], most);
+            // At most two blanks: the common case, unrolled.
+            if (ns == 0) self.emit(cand);
+            if (most >= 1 and ns <= 1 and !(self.only_needed and ns != 1)) {
+                for (0..k) |j| {
+                    if (ns == 1 and letter[j] != short[0]) continue;
+                    cand.blanks = @as(u16, 1) << @intCast(at[j]);
+                    cand.score = base_score - loss[j];
+                    self.emit(cand);
+                }
+            }
+            if (most >= 2 and !(self.only_needed and ns != 2)) {
+                // All pairs of the k tiles: the first k(k-1)/2 entries of `pairs`.
+                const all = pairs[0 .. k * (k - 1) / 2];
+                switch (ns) {
+                    0 => for (all) |pr| self.visitTwoBlanks(cand, base_score, at[pr[0]], at[pr[1]], loss[pr[0]] + loss[pr[1]]),
+                    1 => for (all) |pr| {
+                        if (letter[pr[0]] != short[0] and letter[pr[1]] != short[0]) continue;
+                        self.visitTwoBlanks(cand, base_score, at[pr[0]], at[pr[1]], loss[pr[0]] + loss[pr[1]]);
+                    },
+                    else => for (all) |pr| {
+                        const a = letter[pr[0]];
+                        const b = letter[pr[1]];
+                        if (!((a == short[0] and b == short[1]) or (a == short[1] and b == short[0]))) continue;
+                        self.visitTwoBlanks(cand, base_score, at[pr[0]], at[pr[1]], loss[pr[0]] + loss[pr[1]]);
+                    },
+                }
+            }
+            cand.score = base_score;
+            cand.blanks = 0;
+        }
+
+        inline fn visitTwoBlanks(self: *Self, cand: *Candidate, base_score: i32, a: u8, b: u8, lost: i32) void {
+            cand.blanks = (@as(u16, 1) << @intCast(a)) | (@as(u16, 1) << @intCast(b));
+            cand.score = base_score - lost;
+            self.emit(cand);
+        }
+
+        /// The general case for tile sets with more than two blanks.
+        fn expandMany(self: *Self, cand: *Candidate, at: []const u8, letter: []const u5, loss: []const i32, short: []const u5, most: usize) void {
+            const base_score = cand.score;
+            const k = at.len;
+            var mask: u32 = 0;
+            while (mask < (@as(u32, 1) << @intCast(k))) : (mask += 1) {
+                const size = @popCount(mask);
+                if (size > most or size < short.len) continue;
+                if (self.only_needed and size != short.len) continue;
+                // Every letter in `short` needs its own blank of that letter.
+                var covered = true;
+                var used_by_short: u32 = 0;
+                for (short) |l| {
+                    var found = false;
+                    for (0..k) |j| {
+                        const b = @as(u32, 1) << @intCast(j);
+                        if (mask & b != 0 and used_by_short & b == 0 and letter[j] == l) {
+                            used_by_short |= b;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        covered = false;
+                        break;
+                    }
+                }
+                if (!covered) continue;
+                var score = base_score;
+                var blanks: u16 = 0;
+                for (0..k) |j| {
+                    if ((mask >> @intCast(j)) & 1 != 0) {
+                        blanks |= @as(u16, 1) << @intCast(at[j]);
+                        score -= loss[j];
+                    }
+                }
+                cand.score = score;
+                cand.blanks = blanks;
+                self.emit(cand);
+            }
+            cand.score = base_score;
+            cand.blanks = 0;
         }
     };
 }

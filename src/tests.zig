@@ -1,7 +1,8 @@
 //! Randomized differential tests: the GADDAG generator against the CSP port
 //! of solver.py, on random games over a small fixed dictionary (all 2- and
-//! 3-letter SOWPODS words plus 700 longer ones). `bingo verify` runs the
-//! same comparison with the full word list.
+//! 3-letter SOWPODS words plus 700 longer ones), played under the full
+//! rules and then replayed with real racks. `bingo verify` runs the same
+//! comparison with the full word list.
 
 const std = @import("std");
 const rules = @import("rules.zig");
@@ -9,6 +10,7 @@ const lexicon = @import("lexicon.zig");
 const board = @import("board.zig");
 const movegen = @import("movegen.zig");
 const csp = @import("csp.zig");
+const game = @import("game.zig");
 
 const Move = board.Move;
 const Position = board.Position;
@@ -200,13 +202,29 @@ fn entries(gpa: std.mem.Allocator, moves: []const Move) ![]Entry {
     return list.toOwnedSlice(gpa);
 }
 
-fn playRandomGames(blanks: u8, games: usize, seed: u64) !void {
+/// True if each blank in `m` stands for a letter the natural tiles in
+/// `supply` cannot cover, and no more blanks are used than that.
+fn blanksNeeded(m: *const Move, supply: *const [27]u8) bool {
+    var uses: [26]u8 = @splat(0);
+    var blanks: [26]u8 = @splat(0);
+    var it = m.new_mask;
+    while (it != 0) : (it &= it - 1) {
+        const c = m.tiles[@ctz(it)];
+        uses[rules.letterOf(c)] += 1;
+        if (rules.isBlank(c)) blanks[rules.letterOf(c)] += 1;
+    }
+    for (0..26) |l| {
+        if (blanks[l] != uses[l] -| supply[l]) return false;
+    }
+    return true;
+}
+
+fn playRandomGames(r: rules.Rules, games: usize, seed: u64) !void {
     const gpa = std.testing.allocator;
     var lex = try lexicon.build(gpa, test_words);
     defer lex.deinit(gpa);
     var words = try csp.WordSets.init(gpa, test_words);
     defer words.deinit(gpa);
-    const r = rules.Rules{ .blanks = blanks };
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
@@ -214,16 +232,25 @@ fn playRandomGames(blanks: u8, games: usize, seed: u64) !void {
     defer gad.deinit();
     var ref = movegen.Collector{ .gpa = gpa };
     defer ref.deinit();
+    var needed = movegen.Collector{ .gpa = gpa };
+    defer needed.deinit();
+    var turns: std.ArrayList(game.Turn) = .empty;
+    defer turns.deinit(gpa);
+    const realized = try gpa.create(game.Realized);
+    defer gpa.destroy(realized);
 
     var positions: usize = 0;
     for (0..games) |_| {
-        var pos = Position.init(r);
-        while (true) {
+        var g = game.Game.init(r);
+        turns.clearRetainingCapacity();
+        while (!g.over()) {
+            const sup = g.supply();
             gad.moves.clearRetainingCapacity();
             ref.moves.clearRetainingCapacity();
-            movegen.generate(movegen.Collector, &gad, &pos, &lex, r);
-            const halo = csp.computeHalo(&words, &pos);
-            try csp.generate(movegen.Collector, &ref, gpa, &words, &pos, &halo, r);
+            needed.moves.clearRetainingCapacity();
+            movegen.generate(movegen.Collector, &gad, &g.pos, &lex, r, sup);
+            const halo = csp.computeHalo(&words, &g.pos);
+            try csp.generate(movegen.Collector, &ref, gpa, &words, &g.pos, &halo, r, sup);
             try std.testing.expect(!gad.failed and !ref.failed);
 
             const a = try entries(gpa, gad.moves.items);
@@ -237,43 +264,67 @@ fn playRandomGames(blanks: u8, games: usize, seed: u64) !void {
                 try std.testing.expectEqualSlices(u16, &y.key, &x.key);
                 try std.testing.expectEqual(y.score, x.score);
             }
-            for (gad.moves.items) |*m| try std.testing.expectEqual(pos.scoreMove(m, r), m.score);
+            for (gad.moves.items) |*m| {
+                try std.testing.expectEqual(g.pos.scoreMove(m, r), m.score);
+                try std.testing.expect(m.placed <= sup.max_tiles);
+            }
+            // The as-needed blank mode yields exactly the plays that use
+            // blanks only where they must.
+            var as_needed = sup;
+            as_needed.blanks = .as_needed;
+            movegen.generate(movegen.Collector, &needed, &g.pos, &lex, r, as_needed);
+            var expected: usize = 0;
+            for (gad.moves.items) |*m| expected += @intFromBool(blanksNeeded(m, &sup.counts));
+            try std.testing.expectEqual(expected, needed.moves.items.len);
+            for (needed.moves.items) |*m| try std.testing.expect(blanksNeeded(m, &sup.counts));
             positions += 1;
-            if (gad.moves.items.len == 0 or pos.bag_total == 0) break;
 
+            if (gad.moves.items.len == 0) {
+                g.pass();
+                try turns.append(gpa, .pass);
+                continue;
+            }
             const pick = gad.moves.items[rng.uintLessThan(usize, gad.moves.items.len)];
             // Plays round-trip through the text format.
             var buf: [64]u8 = undefined;
             var w = std.Io.Writer.fixed(&buf);
-            try pos.writePlay(&pick, &w);
+            try g.pos.writePlay(&pick, &w);
             const text = w.buffered();
             var tok = std.mem.tokenizeScalar(u8, text, ' ');
             const row = try std.fmt.parseInt(usize, tok.next().?, 10);
             const col = try std.fmt.parseInt(usize, tok.next().?, 10);
             const d: u1 = if (std.mem.eql(u8, tok.next().?, "across")) 0 else 1;
-            const parsed = try pos.parsePlay(&lex, r, row, col, d, tok.next().?);
+            const parsed = try g.pos.parsePlay(&lex, r, row, col, d, tok.next().?);
             try std.testing.expectEqualSlices(u16, &pick.key(), &parsed.key());
             try std.testing.expectEqual(pick.score, parsed.score);
 
-            pos.apply(&lex, &pick);
-            var fresh = pos;
+            g.play(&lex, &pick);
+            try turns.append(gpa, .{ .play = pick });
+            var fresh = g.pos;
             fresh.recomputeCrossChecks(&lex);
             for (0..2) |dd| for (0..rules.NN) |i| {
-                if (pos.cells[dd][i] != 0) continue;
-                try std.testing.expectEqual(fresh.xmask[dd][i], pos.xmask[dd][i]);
-                try std.testing.expectEqual(fresh.xsum[dd][i], pos.xsum[dd][i]);
+                if (g.pos.cells[dd][i] != 0) continue;
+                try std.testing.expectEqual(fresh.xmask[dd][i], g.pos.xmask[dd][i]);
+                try std.testing.expectEqual(fresh.xsum[dd][i], g.pos.xsum[dd][i]);
             };
         }
+        // The game replays with real racks and draws, to the same scores.
+        const again = try game.realize(&lex, r, turns.items, realized);
+        try std.testing.expectEqual(g.score, again.score);
     }
     try std.testing.expect(positions > games * 5);
 }
 
-test "GADDAG generator matches the CSP port, no blanks" {
-    try playRandomGames(0, 6, 1);
+test "GADDAG matches the CSP port: solitaire, no blanks (solver.py's rules)" {
+    try playRandomGames(.{ .players = 1, .blanks = 0 }, 4, 1);
 }
 
-test "GADDAG generator matches the CSP port, two blanks" {
-    try playRandomGames(2, 2, 2);
+test "GADDAG matches the CSP port: two players, two blanks" {
+    try playRandomGames(.{}, 2, 2);
+}
+
+test "GADDAG matches the CSP port: solitaire, two blanks, NASPA end" {
+    try playRandomGames(.{ .players = 1, .end_rule = .naspa }, 2, 3);
 }
 
 test "every dictionary word is accepted and its GADDAG paths exist" {
@@ -322,11 +373,11 @@ test "first plays: count, centre coverage and a hand-scored example" {
     const gpa = std.testing.allocator;
     var lex = try lexicon.build(gpa, "JOKER\nJO\nOK\nKO\nOX\n");
     defer lex.deinit(gpa);
-    const r = rules.Rules{};
+    const r = rules.Rules{ .blanks = 0 };
     const pos = Position.init(r);
     var col = movegen.Collector{ .gpa = gpa };
     defer col.deinit();
-    movegen.generate(movegen.Collector, &col, &pos, &lex, r);
+    movegen.generate(movegen.Collector, &col, &pos, &lex, r, .{ .counts = pos.pool, .max_tiles = 7 });
     // Each word, in each direction, at each offset that covers the centre.
     try std.testing.expectEqual(@as(usize, 2 * (5 + 2 + 2 + 2 + 2)), col.moves.items.len);
     // JOKER across from (7,3): J on the double letter at (7,3), the centre
