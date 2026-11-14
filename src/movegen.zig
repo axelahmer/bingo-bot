@@ -84,6 +84,10 @@ pub const Supply = struct {
     /// Most tiles one play may place (the mover's rack size).
     max_tiles: u8,
     blanks: BlankMode = .any,
+    /// Letters allowed on each empty square, indexed row * 15 + col (search
+    /// plans use this to keep squares free or reserve them for one letter).
+    /// Null allows every letter everywhere.
+    restrict: ?*const [rules.NN]u32 = null,
 };
 
 /// Generate every legal play in `pos` from `sup`, calling
@@ -122,6 +126,7 @@ fn run(
         .max_place = max_place,
         .blanks = sup.counts[rules.BLANK_SLOT],
         .only_needed = sup.blanks == .as_needed,
+        .restrict = sup.restrict,
     };
     for (0..26) |l| {
         g.left[l] = @intCast(sup.counts[l]);
@@ -206,6 +211,7 @@ fn Generator(comptime V: type, comptime with_blanks: bool) type {
         /// Tiles in the current partial play that must be blanks.
         deficit: u8 = 0,
         only_needed: bool,
+        restrict: ?*const [rules.NN]u32,
 
         // The current line.
         dir: u1 = 0,
@@ -270,7 +276,8 @@ fn Generator(comptime V: type, comptime with_blanks: bool) type {
             var empty: u16 = 0;
             var cross: u16 = 0;
             for (0..N) |i| {
-                const xm = pos.xmask[d][base + i];
+                var xm = pos.xmask[d][base + i];
+                if (self.restrict) |rs| xm &= rs[if (d == 0) line * N + i else i * N + line] | board.HAS_CROSS;
                 self.xm[i] = xm;
                 const bit = @as(u16, 1) << @intCast(i);
                 if (self.cells[i] == 0) {

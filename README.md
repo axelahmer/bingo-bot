@@ -9,6 +9,9 @@ Beaman's cooperative game of 4,142 points (1974), Jeff Grant's 4,207 with
 99 tiles (1979), and Grant's solitaire game of 4,454 using all 100 tiles
 (1981), later raised to 4,470.
 
+Best found so far (SOWPODS, full rules, two blanks): 3,336 in solitaire and
+3,251 for two cooperating players, both in `results/` (see Search).
+
 `solver.py` is the 2023 Python experiment. It is kept unchanged as the
 reference implementation and the performance baseline. `src/` is the Zig
 engine that replaces it.
@@ -23,6 +26,9 @@ Needs Zig 0.17.1 (`pip install ziglang==0.17.1` also provides it).
 The first command that needs the lexicon builds `sowpods.gaddag` from
 `sowpods.txt` (about 1.6 s) and reuses it afterwards.
 
+    zig-out/bin/bingo search --players 1 --seeds 2 --top 16 --out best.txt   # lane plans + beam
+    zig-out/bin/bingo beam --width 64 --out best.txt                 # beam search, no plans
+    zig-out/bin/bingo plans --lane row0 --top 20                     # candidate 15-letter plays
     zig-out/bin/bingo rollout --games 1000 --seed 1 --out best.txt   # 2023 policy, all cores
     zig-out/bin/bingo check --game best.txt                          # replay with real racks and draws
     zig-out/bin/bingo show --game best.txt --turns 10                # the board after 10 turns
@@ -61,6 +67,83 @@ replays the game against them, and prints the full record. One consequence,
 which matches the *Word Ways* history: a two-player game can never use all
 100 tiles, because when one player goes out the other still holds at least
 one.
+
+## Search
+
+### Where the points are
+
+The whole bag holds 187 face points, and a premium square counts only for
+the play that covers it. The big lever is the three triple-word squares on
+each edge row and column: a 15-letter word across all three is worth 27
+times its letters. The finishing play has to place those three squares
+itself, and since a play holds at most 7 tiles, at least 8 of the word's
+letters must already be on the board in exactly the right squares while the
+triple-word squares stay empty. SOWPODS has 5,757 fifteen-letter words;
+OXYPHENBUTAZONE finished with 7 tiles scores (41 + 3 + 10) x 27 + 50 = 1,508
+on an otherwise empty lane. Two such plays, on rows 0 and 14, are worth more
+than any whole game the rollouts find.
+
+Score-driven search never sets these up. It spends triple-word squares one
+at a time: a small beam built PAMPHLETEERINGS across row 0 in three plays
+(TSADDIQIM down through (0,7), then PAMPHLET, then the extension) for
+122 + 110 + 128 points, where one play could have been worth over 1,000.
+
+### Two baselines
+
+`bingo beam` (`src/beam.zig`) is a beam search over the number of tiles
+placed. Layer t keeps the best positions with t tiles on the board, so
+positions compete on score after spending the same number of tiles: the
+per-tile normalisation of the 2023 solver applied to whole positions. Each
+position keeps its best plays of every size, a play of k tiles feeds layer
+t + k, and transpositions are merged by a Zobrist hash. Ties are broken by
+a seeded hash, so each run is reproducible and different seeds give
+different searches.
+
+`bingo plans` and `bingo search` add lane plans (`src/plan.zig`). A plan
+names a lane, a 15-letter word and the 7 squares its finish will fill.
+While it is open the search keeps the finish squares (and the squares just
+inside them) empty, lets each setup square take only its letter, holds the
+finishing tiles back, keeps scarce setup letters for their squares, and
+ranks positions by score plus a bonus per filled setup square. Once every
+setup square is filled the finish is offered as a play; a plan that leaves
+no legal play is dropped. `bingo search` pairs plans for rows 0 and 14 whose
+words fit the natural tiles together, prefers finishes whose setup letters
+are common, and beam-searches each pair with a few seeds.
+
+Results under the full rules (two blanks):
+
+| method | solitaire | two players | time |
+|---|---:|---:|---:|
+| best of 400 rollouts (2023 policy) | 1,820 | 1,814 | 23 s |
+| beam, width 256, no plans | 1,826 | | 48 s |
+| plan search: 16 pairs, 2 seeds each, width 64 | 3,336 | 3,251 | about 7 min |
+
+    zig-out/bin/bingo search --players 1 --width 64 --seeds 2 --top 16 --out best.txt
+    zig-out/bin/bingo search --width 64 --seeds 2 --top 16 --out best.txt
+
+The two best games are in `results/` and replay under `bingo check`. The
+solitaire game uses all 100 tiles; MATHEMATICIZING (1,346) and
+XYLOTYPOGRAPHIC (1,157) across rows 0 and 14 are 75% of its score, and the
+search learned to play both finishes last. The two-player game plays 99
+tiles (a two-player game cannot play all 100).
+
+The *Word Ways* records are 4,207 (cooperative, 99 tiles) and 4,454 to
+4,470 (solitaire), built by hand with a different dictionary:
+BENZOXYCAMPHORS, central to several of them, is not in SOWPODS.
+
+What limits the search now:
+
+- Completing a setup is fragile. Whether both finishes land depends on the
+  seed, the width and the plan, and the plan's estimate predicts the result
+  poorly. A guard that refuses plays leaving a plan short of letters
+  (`Options.guard`) made results worse: it also forbids spending a natural
+  letter that a free blank could later replace, which is how several good
+  games filled their hardest square.
+- Outside the two big plays, about 900 points come from about 28 plays. No
+  x9 play is made, although the two remaining triple-word squares, (7,0)
+  and (7,14), allow one across row 7.
+- The finish squares are kept free of cross words, so the finishes earn no
+  hooks (a cross word through a triple-word square is tripled too).
 
 ## Engine
 
@@ -229,24 +312,24 @@ Fixed in the port, still present in `solver.py`:
 
 ## Next steps
 
-- **Plan for the big plays.** The record games are built around a few huge
-  plays (a 15-letter word across three triple-word squares can be worth
-  over 1,000 points), and those need the right tiles and lanes to still be
-  free when the time comes. A greedy or softmax rollout spends the high
-  tiles and the blanks early: the best of 8 rollouts with seed 1 opens with
-  DuMmIER, both blanks for 66 points. Search should choose target plays
-  first and keep their tiles in reserve (`Supply.counts` is the hook: pass
-  the pool minus the reserved tiles), then fill in the rest of the game.
+- **Finish setups reliably.** Check that each setup square can still be
+  reached, give hard squares (isolated, or rare letters) more weight, and
+  let the beam branch on dropping a plan instead of dropping it only when
+  stuck.
+- **A third big play.** Row 7 between (7,0) and (7,14) gives a x9 play
+  worth 300 to 400 points; hooks under the finish squares add more.
+- **Better play around the plans.** Nested Monte Carlo Search (Cazenave
+  2009) or Nested Rollout Policy Adaptation (Rosin 2011), which set records
+  on single-player puzzles such as Morpion Solitaire, run over the beam's
+  candidate plays, or a learned evaluation, for the 900 points that are not
+  the big plays.
 - **Cache move lists.** Every rollout from the empty board regenerates the
   same 21.6 million first plays, and nested search revisits positions
   constantly. A play changes about a quarter of the 30 lines, so caching
   each line's plays and regenerating only the changed lines should cut
   rollout cost again.
-- **Bounded generation.** Greedy play, beam search and top-K policies only
-  need the best plays. An upper bound on what a partial play can still
+- **Bounded generation.** The beam keeps only the best few plays of each
+  size from each position. An upper bound on what a partial play can still
   score would let the walk skip most of the tree.
-- **Search.** Nested Monte Carlo Search (Cazenave 2009) and Nested Rollout
-  Policy Adaptation (Rosin 2011) set records on single-player puzzles such
-  as Morpion Solitaire and fit this problem directly.
 - **An upper bound** on the total score for the tile set, so results can be
   reported with an optimality gap.
