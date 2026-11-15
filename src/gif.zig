@@ -33,8 +33,8 @@ const base_rgb = [_]u24{
 /// Ink on a background, in 16 steps of coverage (palette 16 + 16 * ramp + step).
 const Ramp = enum(u8) { tile_ink, tile_ink_hi, blank_ink, blank_ink_hi, ink, muted, accent, star };
 const ramp_pairs = [_][2]Color{
-    .{ .tile_ink, .tile }, .{ .tile_ink, .hi },  .{ .blank_ink, .tile }, .{ .blank_ink, .hi },
-    .{ .ink, .bg },        .{ .muted, .bg },     .{ .accent, .bg },      .{ .star, .dw },
+    .{ .tile_ink, .tile }, .{ .tile_ink, .hi }, .{ .blank_ink, .tile }, .{ .blank_ink, .hi },
+    .{ .ink, .bg },        .{ .muted, .bg },    .{ .accent, .bg },      .{ .star, .dw },
 };
 
 fn blend(fg: u24, bg: u24, a: u32) u24 {
@@ -52,7 +52,7 @@ fn palette() [256]u24 {
     var p: [256]u24 = @splat(0);
     for (base_rgb, 0..) |c, i| p[i] = c;
     for (ramp_pairs, 0..) |pr, r| {
-        for (0..16) |a| p[16 + 16 * r + a] = blend(base_rgb[@intFromEnum(pr[0])], base_rgb[@intFromEnum(pr[1])], @intCast(a));
+        for (0..16) |a| p[16 + 16 * r + a] = blend(base_rgb[@backingInt(pr[0])], base_rgb[@backingInt(pr[1])], @intCast(a));
     }
     return p;
 }
@@ -62,11 +62,11 @@ pub const Canvas = struct {
     px: [width * height]u8,
 
     pub fn clear(c: *Canvas) void {
-        @memset(&c.px, @intFromEnum(Color.bg));
+        @memset(&c.px, @backingInt(Color.bg));
     }
 
     fn fill(c: *Canvas, x: usize, y: usize, w: usize, h: usize, color: Color) void {
-        for (y..y + h) |yy| @memset(c.px[yy * width + x ..][0..w], @intFromEnum(color));
+        for (y..y + h) |yy| @memset(c.px[yy * width + x ..][0..w], @backingInt(color));
     }
 
     fn glyph(c: *Canvas, g: *const glyphs.Glyph, pen_x: isize, base_y: isize, ramp: Ramp) void {
@@ -78,7 +78,7 @@ pub const Canvas = struct {
                 const x = pen_x + g.x + @as(isize, @intCast(i));
                 const y = base_y + g.y + @as(isize, @intCast(j));
                 if (x < 0 or y < 0 or x >= width or y >= height) continue;
-                c.px[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))] = 16 + 16 * @intFromEnum(ramp) + a;
+                c.px[@as(usize, @intCast(y)) * width + @as(usize, @intCast(x))] = 16 + 16 * @backingInt(ramp) + a;
             }
         }
     }

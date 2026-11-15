@@ -83,8 +83,9 @@ const usage =
     \\  --level L       nrpa: nesting level (default 3: 100^3 rollouts)
     \\  --iterations N  nrpa: searches per level (default 100)
     \\  --alpha A       nrpa: learning rate (default 1)
-    \\  --bias B        nrpa: weight per point of a play's score in rollouts
-    \\                  (default 0.02)
+    \\  --bias B        nrpa: weight per point of a play's ranking key (its score
+    \\                  plus what it does for the plans) in rollouts (default
+    \\                  0.02); each new best game is written to --out at once
     \\  --rounds N      improve: rounds of --jobs searches (default 10)
     \\  --free-plays K  improve: at most K plays freed per search (default 3)
     \\  --radius R      improve: empty squares within R of a freed tile are free
@@ -1048,6 +1049,26 @@ fn cmdNrpa(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     var shared = nrpa.Shared{ .gpa = gpa };
     defer shared.deinit();
     const t0 = Io.Timestamp.now(io, .awake);
+    var mbuf: [128]u8 = undefined;
+    const method = try std.fmt.bufPrint(&mbuf, "nrpa level {d}, {d} iterations, alpha {d}, bias {d}, {d} per size, {d} jobs", .{ opts.level, opts.iterations, opts.alpha, opts.bias, opts.per_size, jobs });
+    // Each new best game goes to --out at once, so long runs keep their gains.
+    const Save = struct {
+        io: Io,
+        lex: *const Lexicon,
+        opts: Options,
+        method: []const u8,
+        plans: []const planmod.Plan,
+        start: *const Game,
+        t0: Io.Timestamp,
+
+        fn save(ctx: *anyopaque, turns: []const Turn, total: i32) anyerror!void {
+            const sv: *@This() = @ptrCast(@alignCast(ctx));
+            const path = sv.opts.out orelse return;
+            try writeGameFileAs(sv.io, sv.lex, sv.opts, sv.method, path, &.{}, sv.start, turns, sv.plans, sv.opts.seed, total, secondsSince(sv.io, sv.t0));
+        }
+    };
+    var save_ctx = Save{ .io = io, .lex = lex, .opts = opts, .method = method, .plans = plans, .start = &start, .t0 = t0 };
+    if (opts.out != null) shared.saver = .{ .ctx = &save_ctx, .save = Save.save };
     const ts = try gpa.alloc(std.Thread, jobs);
     defer gpa.free(ts);
     for (ts, 0..) |*t, j| {
@@ -1059,11 +1080,6 @@ fn cmdNrpa(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     const secs = secondsSince(io, t0);
     try out.print("\nbest {d} in {d:.1} s:\n", .{ shared.best, secs });
     try writeTurns(out, lex, &start, shared.best_turns.items, true);
-    if (opts.out) |path| {
-        var mbuf: [96]u8 = undefined;
-        const method = try std.fmt.bufPrint(&mbuf, "nrpa level {d}, {d} iterations, alpha {d}, bias {d}, {d} jobs", .{ opts.level, opts.iterations, opts.alpha, opts.bias, jobs });
-        try writeGameFileAs(io, lex, opts, method, path, &.{}, &start, shared.best_turns.items, plans, opts.seed, shared.best, secs);
-    }
 }
 
 /// One search of `bingo improve`: its targets, free squares, the turns it
@@ -1368,7 +1384,7 @@ const Pool = struct {
         var estimate: i32 = 0;
         for (plans) |*pl| estimate += pl.estimate(p.rules);
         try p.out.print("{d:>5}  ({d}/{d} finishes, best play {d:>4}, seed {d}, estimate {d:>4}, {d:.1} s) ", .{
-            @as(u32, @intCast(@max(total, 0))), finished,                        plans.len, @as(u32, @intCast(bestPlay(res.turns))),
+            @as(u32, @intCast(@max(total, 0))), finished,                              plans.len,   @as(u32, @intCast(bestPlay(res.turns))),
             t.seed,                             @as(u32, @intCast(@max(estimate, 0))), res.seconds,
         });
         for (plans) |*pl| {

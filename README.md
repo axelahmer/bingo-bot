@@ -517,6 +517,21 @@ jobs at level 2:
 | 0.05 | 4,007 |
 | 0.1 | 3,165 |
 
+Level 3 with bias 0.03 found **4,054**, exactly Hedt's score, in three of
+four jobs within four top-level iterations (40,000 rollouts each). It was
+given only his final board, not his order of play. The beam search stops
+at 4,049 on the same board. Since three independent searches agree with
+his own, 4,054 looks optimal or nearly so for his board, and beating it
+probably needs a new board rather than a better order.
+
+A position offers NRPA the same short list as the beam: the best
+`--per-size` plays of each size by the beam's ranking key, with `--bias`
+weighing that key. That keeps rollouts fast when no target board fences
+the search, and it also helps on a target board. At level 2 (bias 0.02,
+best of 4 jobs) the default 8 per size reached 4,052, against 3,996 with
+32 per size and 4,011 with every play. Each new best game is written to
+`--out` as soon as it is found.
+
 ### Published records
 
 The published records, with their word lists, methods and sources, are in

@@ -10,7 +10,9 @@
 //!
 //! Plays are restricted exactly as in the beam search (plans with their
 //! reserves, board targets, hooks and guards), so the same options steer
-//! both.
+//! both. As in the beam, a position offers only its best `per_size` plays
+//! of each size by the beam's ranking key (score plus what the play does
+//! for the plans), and the bias weighs that key.
 
 const std = @import("std");
 const rules = @import("rules.zig");
@@ -56,26 +58,6 @@ fn code(m: *const Move) u64 {
     return h;
 }
 
-/// Collects the plays that pass the hook and guard checks.
-const Legal = struct {
-    gpa: Allocator,
-    act: ?*const planmod.Active,
-    pos: *const board.Position,
-    out: *std.ArrayList(Move),
-    failed: bool = false,
-
-    pub fn visit(self: *Legal, c: *const movegen.Candidate) void {
-        if (self.act) |a| {
-            if (a.n_hooks != 0 or a.n_guards != 0) {
-                if (a.hookDelta(self.pos, c) == null) return;
-            }
-        }
-        self.out.append(self.gpa, c.toMove()) catch {
-            self.failed = true;
-        };
-    }
-};
-
 const Search = struct {
     gpa: Allocator,
     lex: *const lexicon.Lexicon,
@@ -83,12 +65,16 @@ const Search = struct {
     opts: Options,
     rng: std.Random,
     moves: std.ArrayList(Move) = .empty,
+    /// The beam's ranking key of each play in `moves`.
+    keys: std.ArrayList(i32) = .empty,
     weights: std.ArrayList(f64) = .empty,
+    top: beam.TopBySize = .{ .k = 8 },
     deltas: std.ArrayList(struct { code: u64, d: f64 }) = .empty,
     rollouts: u64 = 0,
 
     fn deinit(s: *Search) void {
         s.moves.deinit(s.gpa);
+        s.keys.deinit(s.gpa);
         s.weights.deinit(s.gpa);
         s.deltas.deinit(s.gpa);
     }
@@ -113,21 +99,36 @@ const Search = struct {
         };
         while (true) {
             s.moves.clearRetainingCapacity();
+            s.keys.clearRetainingCapacity();
             var sup = g.supply();
             sup.blanks = o.blank_use;
             const act = planmod.activate(o.plans, &g.pos, dropped.*, ctx);
             for (0..27) |t| sup.counts[t] -|= act.reserve[t];
             const steer = act.live != 0 or o.targets.len != 0;
             if (steer) sup.restrict = &act.restrict;
-            var v = Legal{ .gpa = s.gpa, .act = if (steer) &act else null, .pos = &g.pos, .out = &s.moves };
-            movegen.generate(Legal, &v, &g.pos, s.lex, g.rules, sup);
-            if (v.failed) return error.OutOfMemory;
+            s.top.k = @min(@max(o.per_size, 1), beam.TopBySize.max_k);
+            s.top.reset();
+            s.top.act = if (steer) &act else null;
+            s.top.pos = &g.pos;
+            s.top.guard = o.guard;
+            s.top.pending_penalty = o.pending_penalty;
+            s.top.letter_cost = o.letter_cost;
+            movegen.generate(beam.TopBySize, &s.top, &g.pos, s.lex, g.rules, sup);
+            for (1..rules.N + 1) |size| {
+                for (s.top.moves[size][0..s.top.n[size]], s.top.keys[size][0..s.top.n[size]]) |m, key| {
+                    try s.moves.append(s.gpa, m);
+                    try s.keys.append(s.gpa, key);
+                }
+            }
             for (o.plans, 0..) |*p, i| {
                 if ((act.live >> @intCast(i)) & 1 == 0) continue;
                 var avail: [27]u8 = undefined;
                 for (0..27) |t| avail[t] = @min(g.pos.pool[t] -| (act.reserve[t] - p.reserve[t]), p.reserve[t] +| act.spare[t]);
                 if (p.finishMove(s.lex, g.rules, &g.pos, &avail)) |m| {
-                    if (m.placed <= g.rack[g.turn]) try s.moves.append(s.gpa, m);
+                    if (m.placed <= g.rack[g.turn]) {
+                        try s.moves.append(s.gpa, m);
+                        try s.keys.append(s.gpa, m.score);
+                    }
                 }
             }
             if (s.moves.items.len != 0 or act.live == 0) return;
@@ -139,8 +140,8 @@ const Search = struct {
     fn probabilities(s: *Search, pol: *const Policy) !f64 {
         s.weights.clearRetainingCapacity();
         var top: f64 = -std.math.inf(f64);
-        for (s.moves.items) |*m| {
-            const w = (pol.get(code(m)) orelse 0) + s.opts.bias * @as(f64, @floatFromInt(m.score));
+        for (s.moves.items, s.keys.items) |*m, key| {
+            const w = (pol.get(code(m)) orelse 0) + s.opts.bias * @as(f64, @floatFromInt(key));
             try s.weights.append(s.gpa, w);
             top = @max(top, w);
         }
@@ -249,12 +250,19 @@ const Report = struct {
             sh.best = best;
             sh.best_turns.clearRetainingCapacity();
             try sh.best_turns.appendSlice(sh.gpa, turns);
+            if (sh.saver) |sv| try sv.save(sv.ctx, sh.best_turns.items, best);
         }
         try r.out.print("job {d:>2} iteration {d:>3}/{d}: best {d:>5}, overall {d:>5}; {d} rollouts\n", .{
             r.job, it, r.iterations, @as(u32, @intCast(@max(0, best))), @as(u32, @intCast(@max(0, sh.best))), s.rollouts,
         });
         try r.out.flush();
     }
+};
+
+/// Called with each new best game (under the lock), e.g. to write it out.
+pub const Saver = struct {
+    ctx: *anyopaque,
+    save: *const fn (ctx: *anyopaque, turns: []const Turn, total: i32) anyerror!void,
 };
 
 /// The best game over all jobs.
@@ -264,6 +272,7 @@ pub const Shared = struct {
     best: i32 = std.math.minInt(i32),
     best_turns: std.ArrayList(Turn) = .empty,
     failed: bool = false,
+    saver: ?Saver = null,
 
     pub fn deinit(sh: *Shared) void {
         sh.best_turns.deinit(sh.gpa);
