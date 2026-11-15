@@ -13,6 +13,7 @@ const beam = @import("beam.zig");
 const planmod = @import("plan.zig");
 const affix = @import("affix.zig");
 const gif = @import("gif.zig");
+const nrpa = @import("nrpa.zig");
 
 const Lexicon = lexicon.Lexicon;
 const N = rules.N;
@@ -33,6 +34,10 @@ const usage =
     \\  check     replay a game under the full rules with real racks and draws
     \\  trace     replay a game against plans (--plan) and say when and why each
     \\            plan stops being reachable
+    \\  nrpa      Nested Rollout Policy Adaptation: rollouts that learn a weight
+    \\            per play from the best games so far (--level, --iterations,
+    \\            --bias); takes --plan and the target options; --jobs runs
+    \\            independent searches on separate cores
     \\  improve   large-neighbourhood search from --game: free the tiles of a few
     \\            of its plays, keep the rest of its board as targets, search
     \\            again (--jobs at a time), keep any better game, repeat
@@ -52,7 +57,9 @@ const usage =
     \\options:
     \\  --words PATH    word list (default sowpods.txt)
     \\  --cache PATH    GADDAG cache file (default sowpods.gaddag, "none" to skip)
-    \\  --game PATH     a game: one turn per line, "ROW COL across|down WORD" or "pass";
+    \\  --game PATH     a game: turns "ROW COL across|down WORD" (from 0), "8B WORD" /
+    \\                  "B7 WORD" (standard notation, across / down) or "pass",
+    \\                  one per line or separated by commas;
     \\                  a header comment such as "(1 player, ...)" sets --players
     \\  --turns K       use only the first K turns of --game
     \\  --blank-use U   any (default) or needed: generate blank plays only where
@@ -73,6 +80,11 @@ const usage =
     \\                  no other square used until they are all filled: the search
     \\                  builds that board again in its own order
     \\  --target-bonus V  beam: ranking bonus per filled target square (default 30)
+    \\  --level L       nrpa: nesting level (default 3: 100^3 rollouts)
+    \\  --iterations N  nrpa: searches per level (default 100)
+    \\  --alpha A       nrpa: learning rate (default 1)
+    \\  --bias B        nrpa: weight per point of a play's score in rollouts
+    \\                  (default 0.02)
     \\  --rounds N      improve: rounds of --jobs searches (default 10)
     \\  --free-plays K  improve: at most K plays freed per search (default 3)
     \\  --radius R      improve: empty squares within R of a freed tile are free
@@ -156,6 +168,10 @@ const Options = struct {
     target_game: ?[]const u8 = null,
     target_bonus: i32 = 30,
     rounds: usize = 10,
+    level: u8 = 3,
+    iterations: usize = 100,
+    alpha: f64 = 1.0,
+    bias: f64 = 0.02,
     title: ?[]const u8 = null,
     delay_ms: u32 = 1000,
     free_plays: usize = 3,
@@ -252,6 +268,14 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             o.title = v;
         } else if (std.mem.eql(u8, a, "--delay")) {
             o.delay_ms = try std.fmt.parseInt(u32, v, 10);
+        } else if (std.mem.eql(u8, a, "--level")) {
+            o.level = try std.fmt.parseInt(u8, v, 10);
+        } else if (std.mem.eql(u8, a, "--iterations")) {
+            o.iterations = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--alpha")) {
+            o.alpha = try std.fmt.parseFloat(f64, v);
+        } else if (std.mem.eql(u8, a, "--bias")) {
+            o.bias = try std.fmt.parseFloat(f64, v);
         } else if (std.mem.eql(u8, a, "--rounds")) {
             o.rounds = try std.fmt.parseInt(usize, v, 10);
         } else if (std.mem.eql(u8, a, "--free-plays")) {
@@ -351,6 +375,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdHtml(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "gif")) {
         try cmdGif(gpa, io, &lex, opts, out);
+    } else if (std.mem.eql(u8, cmd, "nrpa")) {
+        try cmdNrpa(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "improve")) {
         try cmdImprove(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "verify")) {
@@ -384,40 +410,70 @@ fn loadGame(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, turns: *
     var line_no: usize = 0;
     while (lines.next()) |raw| {
         line_no += 1;
-        if (opts.turns) |k| if (turns.items.len >= k) break;
         const line = std.mem.trim(u8, raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len], " \t\r");
-        if (line.len == 0) continue;
-        if (g.over()) {
-            std.debug.print("{s}:{d}: the game is already over\n", .{ path, line_no });
-            return error.TurnAfterEnd;
+        // A line may hold several turns separated by commas.
+        var parts = std.mem.splitScalar(u8, line, ',');
+        while (parts.next()) |part_raw| {
+            if (opts.turns) |k| if (turns.items.len >= k) return g;
+            const part = std.mem.trim(u8, part_raw, " \t\r");
+            if (part.len == 0) continue;
+            if (g.over()) {
+                std.debug.print("{s}:{d}: the game is already over\n", .{ path, line_no });
+                return error.TurnAfterEnd;
+            }
+            if (std.mem.eql(u8, part, "pass")) {
+                g.pass();
+                try turns.append(gpa, .pass);
+                continue;
+            }
+            const t = parseTurnText(part) orelse return badLine(path, line_no);
+            const m = g.pos.parsePlay(lex, r, t.row, t.col, t.dir, t.word) catch |err| {
+                std.debug.print("{s}:{d}: illegal play {s}: {t}\n", .{ path, line_no, part, err });
+                return err;
+            };
+            if (m.placed > g.rack[g.turn]) {
+                std.debug.print("{s}:{d}: {s} needs {d} tiles but the rack holds {d}\n", .{ path, line_no, part, m.placed, g.rack[g.turn] });
+                return error.RackTooSmall;
+            }
+            g.play(lex, &m);
+            try turns.append(gpa, .{ .play = m });
         }
-        if (std.mem.eql(u8, line, "pass")) {
-            g.pass();
-            try turns.append(gpa, .pass);
-            continue;
-        }
-        var tok = std.mem.tokenizeAny(u8, line, " \t");
-        const row = std.fmt.parseInt(usize, tok.next() orelse return badLine(path, line_no), 10) catch return badLine(path, line_no);
-        const col = std.fmt.parseInt(usize, tok.next() orelse return badLine(path, line_no), 10) catch return badLine(path, line_no);
-        const dir_s = tok.next() orelse return badLine(path, line_no);
-        const word = tok.next() orelse return badLine(path, line_no);
-        const d: u1 = if (std.mem.eql(u8, dir_s, "across")) 0 else if (std.mem.eql(u8, dir_s, "down")) 1 else return badLine(path, line_no);
-        const m = g.pos.parsePlay(lex, r, row, col, d, word) catch |err| {
-            std.debug.print("{s}:{d}: illegal play {s}: {t}\n", .{ path, line_no, line, err });
-            return err;
-        };
-        if (m.placed > g.rack[g.turn]) {
-            std.debug.print("{s}:{d}: {s} needs {d} tiles but the rack holds {d}\n", .{ path, line_no, line, m.placed, g.rack[g.turn] });
-            return error.RackTooSmall;
-        }
-        g.play(lex, &m);
-        try turns.append(gpa, .{ .play = m });
     }
     return g;
 }
 
+const TurnText = struct { row: usize, col: usize, dir: u1, word: []const u8 };
+
+/// One play as text: "ROW COL across|down WORD" (from 0), or standard
+/// notation, "8B WORD" across from row 8, column B, and "B7 WORD" down.
+fn parseTurnText(text: []const u8) ?TurnText {
+    var tok = std.mem.tokenizeAny(u8, text, " \t");
+    const a = tok.next() orelse return null;
+    const b = tok.next() orelse return null;
+    if (tok.next()) |c| {
+        const d = tok.next() orelse return null;
+        if (tok.next() != null) return null;
+        const row = std.fmt.parseInt(usize, a, 10) catch return null;
+        const col = std.fmt.parseInt(usize, b, 10) catch return null;
+        const dir: u1 = if (std.mem.eql(u8, c, "across")) 0 else if (std.mem.eql(u8, c, "down")) 1 else return null;
+        return .{ .row = row, .col = col, .dir = dir, .word = d };
+    }
+    if (a.len < 2 or a.len > 3) return null;
+    const up = std.ascii.toUpper;
+    if (std.ascii.isDigit(a[0])) {
+        const row = std.fmt.parseInt(usize, a[0 .. a.len - 1], 10) catch return null;
+        const col = up(a[a.len - 1]);
+        if (row < 1 or col < 'A' or col > 'A' + N - 1) return null;
+        return .{ .row = row - 1, .col = col - 'A', .dir = 0, .word = b };
+    }
+    const col = up(a[0]);
+    const row = std.fmt.parseInt(usize, a[1..], 10) catch return null;
+    if (row < 1 or col < 'A' or col > 'A' + N - 1) return null;
+    return .{ .row = row - 1, .col = col - 'A', .dir = 1, .word = b };
+}
+
 fn badLine(path: []const u8, line_no: usize) error{BadGameFile} {
-    std.debug.print("{s}:{d}: expected ROW COL across|down WORD, or pass\n", .{ path, line_no });
+    std.debug.print("{s}:{d}: expected ROW COL across|down WORD, 8B WORD (across) or B7 WORD (down), or pass\n", .{ path, line_no });
     return error.BadGameFile;
 }
 
@@ -969,6 +1025,47 @@ fn cmdTrace(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io
     try out.print("live at the end: {d}\n", .{@popCount(live)});
 }
 
+/// Nested Rollout Policy Adaptation from the empty board (see nrpa.zig),
+/// --jobs independent searches with seeds S, S+1, ...; the best game goes
+/// to --out.
+fn cmdNrpa(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
+    var buf: [4]planmod.Plan = undefined;
+    const plans = try parsePlans(lex, opts, &buf);
+    var aff = try loadAffixes(gpa, io, opts, plans.len > 0);
+    defer if (aff) |*a| a.deinit(gpa);
+    const targets = try loadTargets(gpa, io, lex, opts);
+    defer gpa.free(targets);
+    var steer = beamOptions(opts, if (aff) |*a| a else null, 1);
+    steer.plans = plans;
+    steer.targets = targets;
+    steer.exclusive = opts.target_game != null;
+    const start = Game.init(opts.rules);
+    const jobs = @max(1, opts.jobs);
+    try out.print("nrpa level {d}, {d} iterations, bias {d}, {d} job{s}; {d} plans, {d} target squares\n", .{
+        opts.level, opts.iterations, opts.bias, jobs, if (jobs == 1) "" else "s", plans.len, targets.len,
+    });
+    try out.flush();
+    var shared = nrpa.Shared{ .gpa = gpa };
+    defer shared.deinit();
+    const t0 = Io.Timestamp.now(io, .awake);
+    const ts = try gpa.alloc(std.Thread, jobs);
+    defer gpa.free(ts);
+    for (ts, 0..) |*t, j| {
+        const o = nrpa.Options{ .level = opts.level, .iterations = opts.iterations, .alpha = opts.alpha, .bias = opts.bias, .seed = opts.seed + j, .steer = steer };
+        t.* = try std.Thread.spawn(.{}, nrpa.run, .{ gpa, lex, &start, o, io, out, &shared, j });
+    }
+    for (ts) |t| t.join();
+    if (shared.failed) return error.OutOfMemory;
+    const secs = secondsSince(io, t0);
+    try out.print("\nbest {d} in {d:.1} s:\n", .{ shared.best, secs });
+    try writeTurns(out, lex, &start, shared.best_turns.items, true);
+    if (opts.out) |path| {
+        var mbuf: [96]u8 = undefined;
+        const method = try std.fmt.bufPrint(&mbuf, "nrpa level {d}, {d} iterations, alpha {d}, bias {d}, {d} jobs", .{ opts.level, opts.iterations, opts.alpha, opts.bias, jobs });
+        try writeGameFileAs(io, lex, opts, method, path, &.{}, &start, shared.best_turns.items, plans, opts.seed, shared.best, secs);
+    }
+}
+
 /// One search of `bingo improve`: its targets, free squares, the turns it
 /// keeps from the current game, and its result.
 const Neighbour = struct {
@@ -1146,15 +1243,20 @@ fn beamOptions(opts: Options, aff: ?*const affix.Affixes, threads: usize) beam.O
 
 /// Write a game found by beam search, with a header saying how to find it again.
 fn writeGameFile(io: Io, lex: *const Lexicon, opts: Options, path: []const u8, prefix: []const Turn, start: *const Game, turns: []const Turn, plans: []const planmod.Plan, seed: u64, total: i32, seconds: f64) !void {
+    var mbuf: [128]u8 = undefined;
+    const method = try std.fmt.bufPrint(&mbuf, "beam width {d}, {d} per size, blank keep {d}", .{ opts.width, opts.per_size, opts.blank_keep });
+    return writeGameFileAs(io, lex, opts, method, path, prefix, start, turns, plans, seed, total, seconds);
+}
+
+/// Write a game with a header naming the method and the options that found it.
+fn writeGameFileAs(io: Io, lex: *const Lexicon, opts: Options, method: []const u8, path: []const u8, prefix: []const Turn, start: *const Game, turns: []const Turn, plans: []const planmod.Plan, seed: u64, total: i32, seconds: f64) !void {
     var file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     var buf: [4096]u8 = undefined;
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
     const r = opts.rules;
-    try w.print("# beam width {d}, {d} per size, blank keep {d}, goal bonus {d}, hooks {s}, seed {d}", .{
-        opts.width, opts.per_size, opts.blank_keep, opts.goal_bonus, @tagName(opts.hooks), seed,
-    });
+    try w.print("# {s}, goal bonus {d}, hooks {s}, seed {d}", .{ method, opts.goal_bonus, @tagName(opts.hooks), seed });
     if (opts.per_signature != 0) try w.print(", per signature {d}", .{opts.per_signature});
     if (opts.approach != 0) try w.print(", approach {d}", .{opts.approach});
     if (opts.letter_cost != 0) try w.print(", letter cost {d}", .{opts.letter_cost});
@@ -1910,5 +2012,6 @@ test {
     _ = planmod;
     _ = affix;
     _ = gif;
+    _ = nrpa;
     _ = @import("tests.zig");
 }

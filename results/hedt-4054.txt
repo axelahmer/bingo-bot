@@ -1,34 +1,7 @@
-# Nathan Hedt's game as published (4,044 from 99 tiles, 1 player, 2 blanks, wespa) with the last O played as OS
-7 1 across LAWLIKE
-6 1 down ALIEnAGE
-2 7 down PROGRESS
-0 7 down UNPROGRESSIVELY
-1 0 across IDEATION
-0 1 across IF
-0 3 down FA
-5 0 down TE
-3 0 down ROTE
-8 0 across HI
-10 0 across In
-13 0 across EE
-11 1 across AT
-0 0 down MICROTECHNIQUES
-10 4 across RAVIGOTE
-9 11 down WE
-8 11 down AWE
-2 11 down UNDERJAWED
-11 11 across DI
-7 11 across JA
-7 11 across JAM
-6 13 down IMmANTLE
-6 13 down IMmANTLED
-9 14 down TA
-8 14 down UTA
-12 14 down ON
-5 14 down EN
-4 14 down HEN
-0 14 down OXYPHENBUTAZONE
-1 13 down OB
-0 2 down FER
-11 0 across QATS
-8 6 across OS
+# Nathan Hedt's game: 4,054 points from all 100 tiles (1 player, 2 blanks, wespa), as listed in the
+# final report of Al Zimmermann's contest Alphabet City Light (2014),
+# https://azspcs.com/Contest/AlphabetCityLight/FinalReport, in standard notation.
+8B LAWLIKE, B7 ALIEnAGE, H3 PROGRESS, H1 UNPROGRESSIVELY, 2A IDEATION, 1B IF, D1 FA, A6 TE, A4 ROTE,
+9A HI, 11A In, 14A EE, 12B AT, A1 MICROTECHNIQUES, 11E RAVIGOTE, L10 WE, L9 AWE, L3 UNDERJAWED,
+12L DI, 8L JA, 8L JAM, N7 IMmANTLE, N7 IMmANTLED, O10 TA, O9 UTA, O13 ON, O6 EN, O5 HEN,
+O1 OXYPHENBUTAZONE, N2 OB, C1 FER, G8 KO, 12A QATS

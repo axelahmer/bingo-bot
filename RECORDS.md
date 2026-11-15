@@ -26,9 +26,9 @@ One player plays every rack (solitaire) and chooses every draw.
 
 | Score | Tiles | Word list | By | Year | Method | Moves | Source | Notes |
 |---:|---:|---|---|---|---|---|---|---|
-| 4,054 | 100 | CSW12 | Nathan Hedt | 2014 | program | [replays](results/hedt-4054.txt) | [Scrabulizer comments](https://www.scrabulizer.com/blog/post/3) | reported without moves; his 4,044 game with the last O played as OS (worth 10, the best place for it) scores exactly this |
-| 4,049 | 100 | SOWPODS | **bingo-bot** | 2026 | beam search over Hedt's final board as targets | [replays](results/solitaire-4049-hedt-board.txt) | [this repo](#our-searches) | Hedt's board in our order of play; his own order with the last O gives 4,054 |
-| 4,044 | 99 | CSW12 | Nathan Hedt | 2014 | program | [replays](results/hedt-4044.txt) | [Scrabulizer comments](https://www.scrabulizer.com/blog/post/3) | moves as DejMar listed them, one O left over; replays with SOWPODS and CSW24; as a two-player game the order is impossible |
+| 4,054 | 100 | CSW12 | Nathan Hedt | 2014 | program | [replays](results/hedt-4054.txt) | [AZsPCS final report](https://azspcs.com/Contest/AlphabetCityLight/FinalReport) | the published solution of Al Zimmermann's contest Alphabet City Light, all 100 tiles |
+| 4,049 | 100 | SOWPODS | **bingo-bot** | 2026 | beam search over Hedt's final board as targets | [replays](results/solitaire-4049-hedt-board.txt) | [this repo](#our-searches) | Hedt's board in our order of play; his own order scores 4,054 |
+| 4,044 | 99 | CSW12 | Nathan Hedt | 2014 | program | [replays](results/hedt-4044.txt) | [Scrabulizer comments](https://www.scrabulizer.com/blog/post/3) | DejMar's listing of the same game without its next-to-last play (KO), so one O is left over |
 
 ### General dictionaries
 
@@ -101,7 +101,7 @@ clock for the beam that found the game; a search runs many beams.
 
 | Date | Score | Type | Word list | Plans | Search settings | Time | Machine | Commit | Game | Notes |
 |---|---:|---|---|---|---|---:|---|---|---|---|
-| 2026-11-15 | 4,049 | one player | SOWPODS | UNPROGRESSIVELY + MICROTECHNIQUES + OXYPHENBUTAZONE | beam width 512, 8 per size, blank keep 0, goal bonus 0, hooks prefix, seed 1, mid bonus 0, drop penalty 2000, target game hedt-4044.txt, target bonus 30 | 2 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [solitaire-4049-hedt-board.txt](results/solitaire-4049-hedt-board.txt) | Hedt's board in our order of play; his own order with the last O gives 4,054 |
+| 2026-11-15 | 4,049 | one player | SOWPODS | UNPROGRESSIVELY + MICROTECHNIQUES + OXYPHENBUTAZONE | beam width 512, 8 per size, blank keep 0, goal bonus 0, hooks prefix, seed 1, mid bonus 0, drop penalty 2000, target game hedt-4044.txt, target bonus 30 | 2 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [solitaire-4049-hedt-board.txt](results/solitaire-4049-hedt-board.txt) | Hedt's board in our order of play; his own order scores 4,054 |
 | 2026-11-15 | 3,864 | one player | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 128, 8 per size, blank keep 0, goal bonus 200, hooks prefix, seed 8, per signature 4, letter cost 27, mid bonus 20 | 2 min | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [solitaire-3864.txt](results/solitaire-3864.txt) |  |
 | 2026-11-15 | 3,844 | two players | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 64, 8 per size, blank keep 0, goal bonus 200, hooks prefix, seed 5, per signature 4, letter cost 27, mid bonus 20 | 87 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [two-player-3844.txt](results/two-player-3844.txt) |  |
 | 2026-11-15 | 3,828 | one player | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 128, 8 per size, blank keep 0, goal bonus 200, hooks strict, seed 1, per signature 4, letter cost 27, mid bonus 20 | 90 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | d8e58bc | [solitaire-3828.txt](results/solitaire-3828.txt) |  |

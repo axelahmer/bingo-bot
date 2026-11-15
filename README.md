@@ -15,8 +15,9 @@ Best found so far (SOWPODS, full rules, two blanks):
 - **Hedt's board:** 4,049 in solitaire, using all 100 tiles. This is
   Nathan Hedt's 2014 record board (4,044 from 99 tiles, Collins words),
   played in an order our search found.
-- **Hedt's own order:** his order plus the leftover O gives 4,054, the
-  score he reported without moves.
+- **The record:** Hedt's own order gives 4,054 with all 100 tiles. This is
+  the published solution of Al Zimmermann's 2014 contest Alphabet City
+  Light, and is in `results/hedt-4054.txt`.
 
 All of these games are in `results/` and replay under `bingo check`. Every
 record we know of, by type and word list, is in [RECORDS.md](RECORDS.md).
@@ -58,8 +59,15 @@ the repository, since the Collins lists are copyrighted. To fetch it:
 
 then pass `--words csw24.txt --cache csw24.gaddag` to any command.
 
-A game file has one turn per line: `ROW COL across|down WORD` (blanks
-written as lower-case letters) or `pass`. Players alternate. Rule options:
+A game file has one turn per line, or several separated by commas. Each
+turn is one of:
+- `ROW COL across|down WORD`, counting from 0;
+- standard notation: `8B WORD` plays across from row 8, column B, and
+  `B7 WORD` plays down;
+- `pass`.
+
+Blanks are written as lower-case letters, so a published move list can be
+pasted as it is. Players alternate. Rule options:
 `--players 1|2` (default 2), `--blanks N` (default 2), `--end wespa|naspa`
 (default wespa). `solver.py`'s rules are `--players 1 --blanks 0`.
 
@@ -427,8 +435,9 @@ but only after two changes:
   turn 3). It scored 3,862.
 
 His own order scores 5 more: IF then FA makes 35 where our IFF makes 30.
-His game plus the leftover O, which is worth 10 at most (OS), gives 4,054,
-the score he reported (`results/hedt-4054.txt`).
+His published 4,054 (`results/hedt-4054.txt`, from the contest's final
+report) is the 4,044 game with the leftover O played as KO for 10, which is
+the most that O can score anywhere.
 
 **Learning targets: large-neighbourhood search.** `bingo improve --game G`
 treats the best game so far as the target and searches around it. Each
@@ -472,6 +481,42 @@ The two bold games are `results/solitaire-3864.txt` and
 `bingo trace --game G --plan ...` replays a game against plans and reports
 when each one stopped being reachable, and why.
 
+### Learned weights: Nested Rollout Policy Adaptation
+
+**Symmetry.** Only the transpose (rows and columns swapped) maps words to
+words; rotations and flips reverse them. Plans fix one orientation, and
+the beam merges positions that different orders of the same plays reach
+(a Zobrist hash of the board), so symmetry costs nothing.
+
+**Branch and bound.** Exact search over whole games is out of reach: about
+30 turns, each with up to millions of plays. It is plausible for fixed
+sub-problems with strong bounds. The main one is the best order of play
+for a given final board, since the score of a play depends only on which
+squares are already filled.
+
+**NRPA.** `bingo nrpa` is Nested Rollout Policy Adaptation (Rosin 2011),
+the method behind several records in single-player puzzles such as
+Morpion Solitaire. A rollout plays a whole game, choosing each play with
+probability proportional to exp(weight + bias × score). A level-n search
+runs `--iterations` level-(n-1) searches and after each one moves the
+weights towards the best game so far. The weights are the learned targets:
+they come to name the plays, and their order, that good games share. Plays
+are restricted exactly as in the beam search, so `--plan`, `--target` and
+`--target-game` steer it the same way, and `--jobs` runs independent
+searches on separate cores.
+
+On Hedt's board (`--target-game results/hedt-4054.txt`, prefix hooks, no
+setup bonus), a rollout with its adaptation takes about 1.5 ms. Level 2
+(10,000 rollouts) takes 35 s per job, and level 3 about an hour. Best of 4
+jobs at level 2:
+
+| `--bias` | best |
+|---|---:|
+| 0.005 | 3,172 |
+| 0.02 | 4,011 |
+| 0.05 | 4,007 |
+| 0.1 | 3,165 |
+
 ### Published records
 
 The published records, with their word lists, methods and sources, are in
@@ -485,8 +530,9 @@ Computers have been used on single plays (Kyle Cronan's exhaustive program,
 Lucassen's SAT solver) and once on whole games: Al Zimmermann's 2014
 programming contest "Alphabet City Light" asked for the highest combined
 score. Hedt won it with 4,037 (4,032 from 99 tiles) and later reached
-4,044 from 99 tiles (4,054 with all 100); the runner-up scored 4,026 with
-TWL words. The other game records were built and then tuned by hand: the
+4,054 with all 100 tiles; the runner-up scored 4,026 with TWL words. The
+contest's final report lists his 4,054 move by move, and DejMar's 4,044
+listing is the same game without its next-to-last play. The other game records were built and then tuned by hand: the
 Facebook record went 3,953, 3,962, 3,966, 3,969, 3,983, 3,986, 3,995
 between 2009 and 2012.
 
@@ -701,9 +747,15 @@ Fixed in the port, still present in `solver.py`:
   column at once. This is a small crossword-construction problem (a SAT or
   constraint search over the squares beside the lane, as Lucassen did for
   one play).
-- **Run `improve` for hours.** On 12 cores, `--jobs 12` runs 12
-  neighbourhoods per round. Wider neighbourhoods (`--free-plays 6
-  --radius 3`) can change the shape of the board.
+- **Run `improve` and `nrpa` for hours.** On 12 cores, `--jobs 12` runs 12
+  neighbourhoods per round or 12 independent NRPA searches. Wider
+  neighbourhoods (`--free-plays 6 --radius 3`) can change the shape of the
+  board. NRPA at level 3 or 4 with plans but no target board searches new
+  boards, not just new orders.
+- **Exact ordering of a fixed board.** The best order of play for a given
+  final board is a longest-path problem over the subsets of its tiles. With
+  a good upper bound, branch and bound could prove whether 4,054 is optimal
+  for Hedt's board.
 - **A third big play that does not split the board.** Row 7 between (7,0)
   and (7,14) gives a x9 play worth 300 to 500 points, but a row-7 plan
   walls off the two halves until it is played. Plans that open late, after
