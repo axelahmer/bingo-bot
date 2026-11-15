@@ -9,9 +9,11 @@ Beaman's cooperative game of 4,142 points (1974), Jeff Grant's 4,207 with
 99 tiles (1979), and Grant's solitaire game of 4,454 using all 100 tiles
 (1981), later raised to 4,470.
 
-Best found so far (SOWPODS, full rules, two blanks): 3,693 in solitaire and
-3,635 for two cooperating players, both in `results/` (see Search). The
-best single play found is OXYPHENBUTAZONE for 1,619.
+Best found so far (SOWPODS, full rules, two blanks): 3,828 in solitaire and
+3,816 for two cooperating players, both in `results/` (see Search). The
+best single play found is OXYPHENBUTAZONE for 1,619. The record with
+tournament (Collins) words is Nathan Hedt's 4,044 from 99 tiles (2014);
+our engine replays it exactly (`results/hedt-4044.txt`).
 
 `solver.py` is the 2023 Python experiment. It is kept unchanged as the
 reference implementation and the performance baseline. `src/` is the Zig
@@ -36,6 +38,15 @@ The first command that needs the lexicon builds `sowpods.gaddag` from
     zig-out/bin/bingo moves --game best.txt --turns 10               # every legal play there
     zig-out/bin/bingo bench --game bench/game-full.txt               # timing per turn
     zig-out/bin/bingo verify --games 4                               # GADDAG vs the CSP port
+
+Word lists: `sowpods.txt` (267,751 words) is the default. Collins Scrabble
+Words 2024 (280,887 words, 13,759 more than ours and 623 fewer) is not in
+the repository, since the Collins lists are copyrighted. To fetch it:
+
+    curl -L -o CSW24.txt "https://raw.githubusercontent.com/echo544/scrabble-game/main/CSW24.txt"
+    tr -d '\r' < CSW24.txt | awk '{print toupper($1)}' | grep -E '^[A-Z]{2,15}$' | sort -u > csw24.txt
+
+then pass `--words csw24.txt --cache csw24.gaddag` to any command.
 
 A game file has one turn per line: `ROW COL across|down WORD` (blanks
 written as lower-case letters) or `pass`. Players alternate. Rule options:
@@ -172,6 +183,7 @@ Results under the full rules (two blanks):
 | beam, width 256, no plans | 1,826 | | 48 s |
 | plan search: 16 pairs, 2 seeds each, width 64 | 3,336 | 3,251 | about 7 min |
 | best pair, hooks and letter cost (below) | 3,693 | 3,635 | 47 s, 86 s |
+| a middle spine and two edges (below) | 3,828 | 3,816 | 90 s, 45 s |
 
 The first three rows come from the code as it was before the changes
 below; the last row is reproduced by
@@ -265,64 +277,126 @@ the triple-word square at (0,7)). `results/two-player-play-1619.txt` (a
 3,594 game) holds the best single play found: OXYPHENBUTAZONE for 1,619,
 with hooks XI, BOWLLIKE, ZO and ESTRANGE.
 
-The middle row is implemented too (`row7` and `col7` lanes, and `--mid K`
-in `bingo search` adds a x9 plan across row 7) but does not work yet. Until
-its finish is played, a row-7 plan is a wall across the middle of the
-board, crossable only at its 8 setup squares, each fixed to one letter.
-Runs with one explored a tenth as many plays and never finished it.
+### A middle spine, as in the record games
+
+Two record games have full move lists: Jeff Grant's 4,454 (solitaire, *Word
+Ways* 1981) and Nathan Hedt's 4,044 (Collins words, 2014; see below). Both
+have the same shape. The first play goes through the centre, and by the
+fourth play the middle row (or column) holds a 15-letter word scored x9:
+Grant's JACKPUDDINGHOOD around PUDDING for 504, Hedt's UNPROGRESSIVELY
+around PROGRESS for 302. That word is a spine. Both edge setups are built
+off it, and the two x27 plays come last.
+
+Our first middle plans were finished last like the edge plans, so until
+the end the middle row was a wall, crossable only at its setup squares,
+each fixed to one letter. Runs with one explored a tenth as many plays and
+never finished it. Now a middle plan has the record shape. Its setup is an
+8-letter word through the centre (PROGRESS), and its finish takes both ends
+(UN and IVELY). It earns its own small bonus per setup square
+(`--mid-bonus`, default 20; eight squares are worth less than the 302-point
+finish), so the beam plays the finish as soon as it can.
+
+Hedt's three words in our orientation (`--plan row0:MICROTECHNIQUES:0,2,7,9,11,12,14
+--plan row7:UNPROGRESSIVELY:0,1,10,11,12,13,14 --plan
+row14:OXYPHENBUTAZONE:0,1,2,3,7,11,14`), solitaire, width 64, strict hooks,
+letter cost 27, 8 seeds per setting:
+
+| setting | seeds above 3,700 | best game |
+|---|---:|---:|
+| `--mid-bonus 66` (a third of the edge bonus, as before) | 0 | 2,648 |
+| `--mid-bonus 0` | 0 | 3,618 |
+| `--mid-bonus 20` | 1 | 3,791 |
+| `--mid-bonus 20 --per-signature 8` | 4 | 3,816 |
+| `--mid-bonus 20 --per-signature 4` | 8 | 3,824 |
+
+At width 128 the best solitaire game is 3,828 (`results/solitaire-3828.txt`).
+For two players at width 64 all eight seeds scored 3,756 to 3,816
+(`results/two-player-3816.txt`, 1,922 + 1,894). In that game UNPROGRESSIVELY
+came at turn 16 for 302, MICROTECHNIQUES scored 1,246 and OXYPHENBUTAZONE
+1,520; the other 24 plays scored 748.
+
+`bingo search --mid K` adds the K best middle words of this shape that fit
+with each pair. It now also tries each pair both ways round (hooks run off
+the first letters of a top-row word and onto the last letters of a
+bottom-row word) and allows 4-letter setup runs on the edges by default
+(`--max-run 4`), which MICROTECHNIQUES needs for ROTE.
 
 ### Published records
 
-Whole games. All were built by hand with chosen draws, except Sudbery's,
-which was played out with random draws.
+Whole games, with chosen draws unless noted:
 
-| score | tiles | players | word list | source |
-|---:|---:|---|---|---|
-| 3,108 | | 2, cooperative | | Darryl Francis, *Word Ways* 1972 |
-| 4,047 | | 2, cooperative | general dictionaries, BENZOXYCAMPHORS | Ron Jerome, *Word Ways* 1974 |
-| 4,142 | | 2, cooperative | general dictionaries, BENZOXYCAMPHORS | Ralph Beaman, *Word Ways* 1974 |
-| 4,207 | 99 | 2, cooperative | general dictionaries, BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1979 |
-| 4,454 | 100 | solitaire | general dictionaries, BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1981 |
-| 4,470 | 100 | solitaire | as above, adjusted | Jeff Grant, *Word Ways* 2009 |
-| 3,986 | 99 | 2, cooperative | OSPD and Webster's Tenth Collegiate | Stephen Root and Nathan Hedt, *Word Ways* 2003 |
-| 3,674 | | 2 (3,658 by one) | North American and British lists | Clare Sudbery, 2004 (PixiePit) |
+| score | tiles | word list | big words | source |
+|---:|---|---|---|---|
+| 3,108 | | | | Darryl Francis, *Word Ways* 1972 |
+| 4,047 | | general dictionaries | BENZOXYCAMPHORS | Ron Jerome, *Word Ways* 1974 |
+| 4,142 | | general dictionaries | BENZOXYCAMPHORS | Ralph Beaman, *Word Ways* 1974 |
+| 4,207 | 99, two players | general dictionaries | BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1979 |
+| 4,454 | 100, solitaire | Webster's 2nd and 3rd, the OED | FREQUENTATIVELY, JACKPUDDINGHOOD, BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1981 |
+| 4,470 | 100, solitaire | as above | | Jeff Grant, *Word Ways* 2009 |
+| 3,986 | 99, two players | OSPD and Webster's Tenth (all in TWL06) | MICROTECHNIQUES, OVERIDENTIFYING, OXYPHENBUTAZONE | Stephen Root and Nathan Hedt, *Word Ways* 2003 |
+| 3,674 | two players, random draws | | | Clare Sudbery, PixiePit 2002 (3,658 by one player) |
+| 3,995 by one player, 4,012 together | 99, two players | TWL06 (Facebook Scrabble) | as Root and Hedt | RyanM561 and TenzingHillary, Scrabulizer comments 2012, played out |
+| 4,044 | 99, one rack | CSW12 | MICROTECHNIQUES, UNPROGRESSIVELY, OXYPHENBUTAZONE | Nathan Hedt, 2014, Al Zimmermann's contest |
+| 4,054 | 100 | CSW12 | | Nathan Hedt, 2014, reported without moves |
 
 Single plays:
 
 | score | word list | method | source |
 |---:|---|---|---|
 | 2,037 | general dictionaries (SESQUIOXIDIZING) | by hand | Josefa Heifetz, *Word Ways* 1974 |
-| 1,778 | OWL and the Long Words List | by hand | Dan Stock, in the rec.games.board.scrabble FAQ |
+| 2,044 | SOWPODS plus SESQUIOXIDIZING | by hand | Arian Smit, Scrabulizer 2008 |
+| 1,778 | OWL and the Long Words List | by hand | Dan Stock, rec.games.board.scrabble FAQ |
+| 1,780 | TWL06 | by hand | Arian Smit, Scrabulizer 2008 |
+| 1,783 | TWL06 | program that found nothing higher for TWL06 | Kyle Cronan, Scrabulizer comments 2011 |
 | 1,784 | NASPA list | by hand | "Jodi and Eric", NASPA wiki |
+| 1,785 | SOWPODS | by hand | Arian Smit, Scrabulizer 2008 |
 | 1,786 | NWL23 | SAT solver, proved best for NWL23 | Bob Lucassen, Woogles blog 2024 |
+| 1,787 | CSW15 | by hand | DejMar, Scrabulizer comments 2016 |
+
+A 1,791 SOWPODS play was also claimed (Ben Woo, 2011) without a board, and
+its arithmetic does not check: OECUMENICAL through a triple-word square is
+worth 51, not 66.
 
 The record plays are all OXYPHENBUTAZONE across an edge with seven hooks.
 Dan Stock's: (54 x 27 = 1,458) + 50 + OPACIFYING 63 + BRAINWASHING 63 +
 EJACULATING 63 + ZARFS 27 + PREINTERVIEWED 25 + AMELIORATIVE 17 + YELKS 12.
-Every word of that play is in our SOWPODS list. Lucassen's 1,786 needs
-OPACIFICATIONS, which is not.
 
-So the published targets for SOWPODS are a 3,674-point game, played with
-random draws, and a single play of about 1,780. Nothing published seems to
-search for the whole-game maximum by computer: the game records are hand
-constructions, the SAT solver addressed one play, and a 2024 Wolfram
-Community post searched randomly for all-bingo games.
+Computers have been used on single plays (Kyle Cronan's exhaustive program,
+Lucassen's SAT solver) and once on whole games: Al Zimmermann's 2014
+programming contest "Alphabet City Light" asked for the highest combined
+score. Hedt won it with 4,037 (4,032 from 99 tiles) and later reached
+4,044 from 99 tiles (4,054 with all 100); the runner-up scored 4,026 with
+TWL words. The other game
+records were built and then tuned by hand: the Facebook record went 3,953,
+3,962, 3,966, 3,969, 3,983, 3,986, 3,995 between 2009 and 2012.
 
-Against those targets: the 3,693 solitaire game passes the 3,674 game, but
-that was a two-player game, and our best two-player game (3,635) is 39
-points short of it. Our best single play (1,619) is about 160 points short
-of the record plays; the gap is almost all hooks.
+`results/hedt-4044.txt` is Hedt's game as DejMar transcribed it in the
+Scrabulizer thread. It replays under `bingo check --players 1` with both
+our SOWPODS list and CSW24: 4,044 points from 99 tiles, every score as
+published (UNPROGRESSIVELY 302, MICROTECHNIQUES 1,325, OXYPHENBUTAZONE
+1,586). It is a one-rack game. As a two-player game its order is
+impossible: when OXYPHENBUTAZONE is played only 12 tiles are unplayed, so
+the bag is empty and whoever plays it holds exactly those 7 tiles and goes
+out, yet OB has to follow it.
+
+Where that leaves us. In solitaire our 3,828 is 216 points short of Hedt's
+4,044. For two players our 3,816 beats the 3,674 SOWPODS game, but the
+Facebook game (4,012 together, with TWL06 words, nearly all of which are
+in Collins) is 196 points ahead. Our best single play, 1,619, is about 170 points short
+of the Collins records; the gap is hooks.
 
 What limits the search now:
 
-- **Hooks.** Hooks are found, not designed: the best plays carry 70 to 110
-  points of them (BOWLLIKE through (0,7) in the best game). The record
-  single plays carry 270 or more, from seven long hooks packed into one
-  dense block, which needs a constraint solver to design.
-- **The middle row.** No x9 play is made. The two free triple-word squares,
-  (7,0) and (7,14), need a row-7 plan that does not split the board.
-- **The rest of the game.** Outside the two big plays, about 920 points come
-  from about 27 plays.
+- **Hooks.** Hooks are found, not designed. In the 3,816 game the edge
+  finishes carry 35 and 12 points of them; in Hedt's game 114
+  (MIFF, CLAWLIKE, NE, QAT, UG) and 78 (JAMB, DITZ, DE). The record single
+  plays carry 270 or more, from seven long hooks packed into one dense
+  block, which needs a constraint solver to design.
+- **Timing of the spine.** Our searches play the x9 word at turns 16 to 25;
+  the record games play it by turn 4, and their first play is already a
+  hook for an edge word (Hedt's LAWLIKE, later CLAWLIKE).
+- **The rest of the game.** Outside the three big plays our games score
+  about 750 points, Hedt's 831.
 - **Letters.** A guard that refuses plays leaving a plan short of letters
   (`Options.guard`) made results worse: it also forbids spending a natural
   letter that a free blank could later replace.

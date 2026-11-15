@@ -93,9 +93,13 @@ pub const Context = struct {
     affixes: ?*const affix.Affixes = null,
     /// For guarding middle-lane setup squares (substring checks).
     lex: ?*const Lexicon = null,
-    /// Ranking bonus per filled setup square of an edge plan; a middle plan,
-    /// worth a third as much, gets a third of it.
+    /// Ranking bonus per filled setup square of an edge plan.
     goal_bonus: i32 = 0,
+    /// The same for a middle plan. The record games finish their middle
+    /// word early (an 8-letter core through the centre, then both ends for
+    /// x9) and build both edges off it, so this is kept small enough that
+    /// the finish pays at once instead of waiting for the end.
+    mid_bonus: i32 = 20,
     /// Ranking penalty per square of distance between an unfilled setup
     /// square and the nearest tile, beyond the first, so that the board
     /// grows towards setup squares far from the play.
@@ -858,7 +862,7 @@ pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ct
         const f: u8 = @popCount(p.filled(pos));
         a.plan_filled[pi] = f;
         a.filled += f;
-        a.bonus[pi] = p.bonus(ctx.goal_bonus);
+        a.bonus[pi] = if (p.lane.middle()) ctx.mid_bonus else p.bonus(ctx.goal_bonus);
         a.bonus_now += a.bonus[pi] * f;
         for (hk[pi][0..nh[pi]]) |h| a.addHook(h);
     }

@@ -40,6 +40,8 @@ pub const Options = struct {
     /// Ranking bonus per filled setup square of an unfinished edge plan
     /// (middle plans get a third).
     goal_bonus: i32 = 100,
+    /// Ranking bonus per filled setup square of a middle plan.
+    mid_bonus: i32 = 20,
     /// Whether finishes may earn hooks, and how hooks are grown.
     hooks: planmod.HookMode = .off,
     /// Word, prefix and suffix sets; required when `hooks` is not `.off`.
@@ -264,6 +266,7 @@ const Worker = struct {
             .hooks = sh.opts.hooks,
             .affixes = sh.opts.affixes,
             .goal_bonus = sh.opts.goal_bonus,
+            .mid_bonus = sh.opts.mid_bonus,
             .approach = sh.opts.approach,
             .lex = sh.lex,
         };

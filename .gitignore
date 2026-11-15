@@ -3,3 +3,5 @@ zig-out/
 *.gaddag
 corpus.pkl
 __pycache__/
+csw*.txt
+CSW*.txt
