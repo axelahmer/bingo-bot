@@ -7,6 +7,7 @@
 
 Options for add:
     --play            log the game's highest single play instead of the game
+    --method TEXT     how it was found (default: beam search with lane plans)
     --note TEXT       a note for the row
     --machine TEXT    describe the machine (default: thread count and CPU model)
 
@@ -71,13 +72,16 @@ def family_of(words):
     return "General"
 
 
+PLAN = r"(?:row|col)\d+:([A-Za-z]+):[\d,]*\d(?::(?:\d+=[A-Za-z]+,?)+)?"
+
+
 def plans_of(settings):
-    return " + ".join(re.findall(r"(?:row|col)\d+:([A-Za-z]+):", settings))
+    return " + ".join(re.findall(PLAN, settings))
 
 
 def search_of(settings):
     s = re.sub(r"^search:\s*", "", settings)
-    s = re.sub(r",?\s*(?:plans?\s+)?(?:and\s+)?(?:row|col)\d+:[A-Za-z]+:[\d,]+", "", s)
+    s = re.sub(r",?\s*(?:plans?\s+)?(?:and\s+)?" + PLAN.replace("([A-Za-z]+)", "[A-Za-z]+"), "", s)
     return s.strip(" ,")
 
 
@@ -206,7 +210,7 @@ def machine():
     return f"{os.cpu_count()} threads, {model}" if model else f"{os.cpu_count()} threads"
 
 
-def add(path, play=False, note="", machine_text=None):
+def add(path, play=False, note="", machine_text=None, method=None):
     text = open(path).read()
     header = " ".join(l[1:].strip() for l in text.splitlines() if l.startswith("#"))
     words = re.search(r"\bwords (\S+?)(?:;|\s|$)", header)
@@ -249,7 +253,7 @@ def add(path, play=False, note="", machine_text=None):
         "family": family_of(label),
         "who": OURS,
         "date": datetime.date.today().isoformat(),
-        "method": "beam search with lane plans",
+        "method": method or "beam search with lane plans",
         "moves": "replays",
         "file": os.path.relpath(os.path.abspath(path), ROOT),
         "notes": note,
@@ -269,7 +273,7 @@ def add(path, play=False, note="", machine_text=None):
 def main(args):
     if args[:1] == ["add"]:
         args = args[1:]
-        opts = {"--note": "", "--machine": None}
+        opts = {"--note": "", "--machine": None, "--method": None}
         for k in opts:
             if k in args:
                 i = args.index(k)
@@ -280,7 +284,7 @@ def main(args):
         if not files:
             sys.exit(__doc__)
         for f in files:
-            add(f, play=play, note=opts["--note"], machine_text=opts["--machine"])
+            add(f, play=play, note=opts["--note"], machine_text=opts["--machine"], method=opts["--method"])
     elif args:
         sys.exit(__doc__)
     render(load())

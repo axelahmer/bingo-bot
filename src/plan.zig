@@ -21,6 +21,13 @@
 //! each hook accepts only letters that keep the finish letter and the tiles
 //! beside it a word (`.strict`), or a prefix or suffix of one (`.prefix`).
 //! Middle lanes keep both sides empty.
+//!
+//! A plan can also name hooks outright: a tail is a word laid beside a
+//! finish square, across the lane, so that the finishing tile makes a
+//! chosen cross word with it (Hedt's CLAWLIKE: the tail LAWLIKE, his first
+//! play, waits for the C of MICROTECHNIQUES on a triple-word square). Tail
+//! squares are targets like setup squares: they take only their letter, earn
+//! a ranking bonus when filled, and the finish waits until they are.
 
 const std = @import("std");
 const rules = @import("rules.zig");
@@ -104,6 +111,41 @@ pub const Context = struct {
     /// square and the nearest tile, beyond the first, so that the board
     /// grows towards setup squares far from the play.
     approach: i32 = 0,
+    /// Ranking bonus for a tail, in percent of its hook's points, shared
+    /// among its squares.
+    tail_bonus: i32 = 0,
+    /// Bonuses of the plans after the first live one, in percent: below
+    /// 100 the plans are built one at a time, in the order given.
+    later_bonus: i32 = 100,
+    /// Board targets: each empty one takes only its letter and earns
+    /// `target_bonus` when filled.
+    targets: []const Target = &.{},
+    target_bonus: i32 = 0,
+    /// Keep every other square empty until all targets are filled (to
+    /// build a given board again, then place what is left), except the
+    /// squares marked in `free`.
+    exclusive: bool = false,
+    free: ?*const [NN]bool = null,
+};
+
+pub const max_tails = 6;
+
+/// A letter wanted on one square, apart from any plan: a word of a
+/// designed template, or a tile of a strong board to build again.
+pub const Target = struct {
+    sq: u8,
+    letter: u5,
+};
+
+/// Tiles to lay beside a finish square, across the lane, before the finish:
+/// the finishing tile then makes the hook word `letter ++ tail` (top and
+/// left lanes) or `tail ++ letter` (bottom and right lanes).
+pub const Tail = struct {
+    /// Lane position of the finish square.
+    at: u8,
+    len: u8,
+    /// In board order along the hook line, top to bottom or left to right.
+    letters: [N]u5 = undefined,
 };
 
 pub const Plan = struct {
@@ -118,11 +160,81 @@ pub const Plan = struct {
     /// How many of the setup letters of each kind have no natural tile left
     /// and must be blanks.
     blank_setup: [26]u8 = @splat(0),
+    /// Designed hooks (edge lanes only).
+    tails: [max_tails]Tail = undefined,
+    n_tails: u8 = 0,
 
     /// Board square of lane position i.
     pub fn square(p: *const Plan, i: usize) usize {
         const l = p.lane.line();
         return if (p.lane.dir() == 0) l * N + i else i * N + l;
+    }
+
+    /// Board square of letter j of tail t.
+    pub fn tailSquare(p: *const Plan, t: *const Tail, j: usize) usize {
+        const k = if (p.lane.line() == 0) 1 + j else N - 1 - @as(usize, t.len) + j;
+        return if (p.lane.dir() == 0) k * N + t.at else @as(usize, t.at) * N + k;
+    }
+
+    /// The square just past the far end of tail t, which must stay empty
+    /// until the finish, or null at the board's edge.
+    pub fn tailBeyond(p: *const Plan, t: *const Tail) ?usize {
+        const k: isize = if (p.lane.line() == 0) @as(isize, t.len) + 1 else @as(isize, N) - 2 - @as(isize, t.len);
+        if (k < 0 or k >= N) return null;
+        const ku: usize = @intCast(k);
+        return if (p.lane.dir() == 0) ku * N + t.at else @as(usize, t.at) * N + ku;
+    }
+
+    /// The tail at lane position i, if any.
+    pub fn tailAt(p: *const Plan, i: usize) ?*const Tail {
+        for (p.tails[0..p.n_tails]) |*t| {
+            if (t.at == i) return t;
+        }
+        return null;
+    }
+
+    /// Every tail square is filled.
+    pub fn tailsFilled(p: *const Plan, pos: *const board.Position) bool {
+        for (p.tails[0..p.n_tails]) |*t| {
+            for (0..t.len) |j| {
+                if (pos.cells[0][p.tailSquare(t, j)] == 0) return false;
+            }
+        }
+        return true;
+    }
+
+    /// Tail squares filled, one bit per square in tail order (for signatures).
+    pub fn tailMask(p: *const Plan, pos: *const board.Position) u64 {
+        var m: u64 = 0;
+        var b: u6 = 0;
+        for (p.tails[0..p.n_tails]) |*t| {
+            for (0..t.len) |j| {
+                if (pos.cells[0][p.tailSquare(t, j)] != 0) m |= @as(u64, 1) << b;
+                b +%= 1;
+            }
+        }
+        return m;
+    }
+
+    /// Points tail t adds to the finish (natural tiles assumed).
+    pub fn tailValue(p: *const Plan, t: *const Tail) i32 {
+        const sq = p.square(t.at);
+        var v: i32 = @as(i32, rules.letter_values[p.word[t.at]]) * rules.premiums.letter[0][sq];
+        for (t.letters[0..t.len]) |l| v += rules.letter_values[l];
+        return v * rules.premiums.word[0][sq];
+    }
+
+    /// The hook word tail t makes with its finish letter.
+    pub fn hookWord(p: *const Plan, t: *const Tail, out: *[N + 1]u5) []const u5 {
+        const n: usize = t.len;
+        if (p.lane.line() == 0) {
+            out[0] = p.word[t.at];
+            @memcpy(out[1 .. n + 1], t.letters[0..n]);
+        } else {
+            @memcpy(out[0..n], t.letters[0..n]);
+            out[n] = p.word[t.at];
+        }
+        return out[0 .. n + 1];
     }
 
     /// The squares beside lane position i, off the lane: one for an edge
@@ -193,6 +305,7 @@ pub const Plan = struct {
         for (0..N) |i| {
             if ((p.finish >> @intCast(i)) & 1 != 0) {
                 restrict[p.square(i)] = 0;
+                if (p.tailAt(i) != null) continue;
                 if (if (p.lane.middle()) open_middle else open_edges) continue;
                 var buf: [2]usize = undefined;
                 for (p.sides(i, &buf)) |sq| restrict[sq] = 0;
@@ -200,36 +313,31 @@ pub const Plan = struct {
                 restrict[p.square(i)] &= @as(u32, 1) << p.word[i];
             }
         }
-    }
-
-    /// For the generator's visitors: per (direction, line), the line
-    /// positions that are empty setup squares of this plan.
-    pub fn goalMasks(p: *const Plan, pos: *const board.Position, out: *[2][N]u16) void {
-        var it = p.setup() & ~p.filled(pos);
-        while (it != 0) : (it &= it - 1) {
-            const i: usize = @ctz(it);
-            const sq = p.square(i);
-            const r = sq / N;
-            const c = sq % N;
-            out[0][r] |= @as(u16, 1) << @intCast(c);
-            out[1][c] |= @as(u16, 1) << @intCast(r);
+        // A tail takes only its letters, and nothing may join its far end.
+        for (p.tails[0..p.n_tails]) |*t| {
+            for (0..t.len) |j| restrict[p.tailSquare(t, j)] &= @as(u32, 1) << t.letters[j];
+            if (p.tailBeyond(t)) |sq| restrict[sq] = 0;
         }
     }
 
-    /// The finishing play, if every setup square is filled and it is legal now.
-    pub fn finishMove(p: *const Plan, lex: *const Lexicon, r: rules.Rules, pos: *const board.Position) ?board.Move {
-        if (p.done(pos) or p.filled(pos) != p.setup()) return null;
+    /// The finishing play, if every setup and tail square is filled and it
+    /// is legal now. `avail` is what the finish may take, by tile kind: it
+    /// uses a natural tile where it can and a blank where it must.
+    pub fn finishMove(p: *const Plan, lex: *const Lexicon, r: rules.Rules, pos: *const board.Position, avail: *const [27]u8) ?board.Move {
+        if (p.done(pos) or p.filled(pos) != p.setup() or !p.tailsFilled(pos)) return null;
         var text: [N]u8 = undefined;
-        var naturals = pos.pool;
+        var left = avail.*;
         for (0..N) |i| {
             const l = p.word[i];
             const ch: u8 = @as(u8, l) + 'A';
-            if ((p.finish >> @intCast(i)) & 1 != 0 and naturals[l] == 0) {
+            text[i] = ch;
+            if ((p.finish >> @intCast(i)) & 1 == 0) continue;
+            if (left[l] > 0) {
+                left[l] -= 1;
+            } else if (left[rules.BLANK_SLOT] > 0) {
+                left[rules.BLANK_SLOT] -= 1;
                 text[i] = std.ascii.toLower(ch);
-            } else {
-                text[i] = ch;
-                if ((p.finish >> @intCast(i)) & 1 != 0) naturals[l] -= 1;
-            }
+            } else return null;
         }
         const l = p.lane.line();
         const row: usize = if (p.lane.dir() == 0) l else 0;
@@ -251,7 +359,32 @@ pub const Plan = struct {
         // Blanks score nothing (ignoring which square they take).
         for (0..26) |l| sum -= @as(i32, p.blank_for[l] + p.blank_setup[l]) * rules.letter_values[l];
         const tiles = @popCount(p.finish);
-        return sum * p.multiplier() + (if (tiles == r.rack) r.bingo else 0);
+        var hooks: i32 = 0;
+        for (p.tails[0..p.n_tails]) |*t| hooks += p.tailValue(t);
+        return sum * p.multiplier() + (if (tiles == r.rack) r.bingo else 0) + hooks;
+    }
+
+    /// Add a tail at finish square `at`; false if the square is not a finish
+    /// square, already has one, the lane is a middle lane, or it is too long.
+    pub fn addTail(p: *Plan, at: usize, letters: []const u5) bool {
+        if (p.lane.middle() or p.n_tails == max_tails) return false;
+        if (at >= N or (p.finish >> @intCast(at)) & 1 == 0 or p.tailAt(at) != null) return false;
+        if (letters.len == 0 or letters.len > N - 1) return false;
+        var t = Tail{ .at = @intCast(at), .len = @intCast(letters.len) };
+        @memcpy(t.letters[0..letters.len], letters);
+        p.tails[p.n_tails] = t;
+        p.n_tails += 1;
+        return true;
+    }
+
+    /// Every hook word, and every tail of two or more letters, is a word.
+    pub fn tailsAreWords(p: *const Plan, lex: *const Lexicon) bool {
+        for (p.tails[0..p.n_tails]) |*t| {
+            var buf: [N + 1]u5 = undefined;
+            if (!lex.contains(p.hookWord(t, &buf))) return false;
+            if (t.len >= 2 and !lex.contains(t.letters[0..t.len])) return false;
+        }
+        return true;
     }
 };
 
@@ -435,11 +568,14 @@ fn computeHook(p: *const Plan, plan_index: usize, i: usize, pos: *const board.Po
     return h;
 }
 
-/// Guards an unfilled setup square of a middle lane. Its line across the
-/// lane can grow both ways, so the tiles beside the square, with the setup
+/// Guards an empty target square: a setup or finish square of a middle
+/// lane, or a tail square. The line through it, across the lane or the
+/// hook, can grow both ways, so the tiles beside the square, with its
 /// letter between them, must stay a substring of some word: in the GADDAG,
 /// a path from the root spelling the string backwards.
-pub const MidGuard = struct {
+pub const Guard = struct {
+    /// The run must be a whole word (tails), not just part of one.
+    strict: bool = false,
     dir: u1,
     line: u8,
     letter: u5,
@@ -474,7 +610,7 @@ fn runThrough(cells: *const [N]u8, at: usize, l: u5, text: *[N]u5) [2]usize {
 
 pub const max_plans = 8;
 pub const max_hooks = 64;
-pub const max_mid = 32;
+pub const max_guards = 64;
 
 /// Change in hook value (and in blocking hooks) that one play makes.
 pub const Delta = struct {
@@ -488,15 +624,14 @@ pub const Active = struct {
     live: u8 = 0,
     restrict: [NN]u32 = @splat(lexicon.LETTERS),
     n_plans: u8 = 0,
-    /// Per plan and (direction, line): positions that are empty setup squares.
-    goal: [max_plans][2][N]u16 = @splat(@splat(@splat(0))),
-    /// The same over all plans.
+    /// Per (direction, line): positions that are empty target squares
+    /// (setup or tail squares) of live plans.
     goal_any: [2][N]u16 = @splat(@splat(0)),
-    /// Ranking bonus per setup square, by plan (0 for plans not live).
-    bonus: [max_plans]i32 = @splat(0),
-    /// Setup squares filled, by plan.
-    plan_filled: [max_plans]u8 = @splat(0),
-    /// Bonus earned by the setup squares already filled.
+    /// Ranking bonus for filling each empty target square (summed over the
+    /// plans that want it).
+    sq_bonus: [NN]i32 = @splat(0),
+    /// Bonus earned by the target squares already filled, by plan, and in all.
+    own_bonus: [max_plans]i32 = @splat(0),
     bonus_now: i32 = 0,
     /// Distance penalty now (negative), and how much a tile on each empty
     /// square would reduce it.
@@ -527,23 +662,32 @@ pub const Active = struct {
     /// Per (direction, line): the hook whose finish letter comes before the
     /// line's first square, and the one whose letter comes after its last.
     line_hook: [2][N][2]u8 = @splat(@splat(.{ none, none })),
-    mids: [max_mid]MidGuard = undefined,
-    n_mid: u8 = 0,
+    guards: [max_guards]Guard = undefined,
+    n_guards: u8 = 0,
     lex: ?*const Lexicon = null,
-    /// Per (direction, line): the middle-lane guard on that line, or `none`.
-    line_mid: [2][N]u8 = @splat(@splat(none)),
+    /// Per (direction, line): the guards on that line, one bit each.
+    line_guards: [2][N]u64 = @splat(@splat(0)),
     /// Hook points now, and hooks blocking a finish, over the live plans.
     hook_value: i32 = 0,
     hook_pending: i32 = 0,
     plan_hook_value: [max_plans]i32 = @splat(0),
     plan_pending: [max_plans]i32 = @splat(0),
 
-    /// Ranking bonus for the setup squares a play fills.
+    /// Ranking bonus for the target squares a play fills.
     pub fn goalValue(a: *const Active, dir: u1, line: u8, new_mask: u16) i32 {
-        if (new_mask & a.goal_any[dir][line] == 0) return 0;
+        var it = new_mask & a.goal_any[dir][line];
         var v: i32 = 0;
-        for (0..a.n_plans) |p| v += a.bonus[p] * @popCount(new_mask & a.goal[p][dir][line]);
+        while (it != 0) : (it &= it - 1) {
+            const i: usize = @ctz(it);
+            v += a.sq_bonus[if (dir == 0) @as(usize, line) * N + i else i * N + line];
+        }
         return v;
+    }
+
+    fn addGoal(a: *Active, sq: usize, bonus: i32) void {
+        a.sq_bonus[sq] += bonus;
+        a.goal_any[0][sq / N] |= @as(u16, 1) << @intCast(sq % N);
+        a.goal_any[1][sq % N] |= @as(u16, 1) << @intCast(sq / N);
     }
 
     /// Reduction in the distance penalty from a play's new tiles (the best
@@ -581,34 +725,37 @@ pub const Active = struct {
         return true;
     }
 
-    /// Guard middle-lane setup square i of plan p: restrict the squares just
-    /// beyond both ends of the run through it.
-    fn addMid(a: *Active, lex: *const Lexicon, p: *const Plan, i: usize, pos: *const board.Position) void {
-        const gdir: u1 = 1 - p.lane.dir();
-        const at = p.lane.line();
-        var g = MidGuard{ .dir = gdir, .line = @intCast(i), .letter = p.word[i], .at = @intCast(at), .text = undefined, .lo = 0, .hi = 0 };
-        const cells = pos.cells[gdir][i * N ..][0..N];
+    /// Guard the empty square `sq`, which must take letter `l`, along the
+    /// line in direction `gdir` through it: restrict the squares just beyond
+    /// both ends of the run through it.
+    fn addGuard(a: *Active, lex: *const Lexicon, gdir: u1, sq: usize, l: u5, pos: *const board.Position, strict: bool) void {
+        if (a.n_guards == max_guards) return;
+        const line = if (gdir == 0) sq / N else sq % N;
+        const at = if (gdir == 0) sq % N else sq / N;
+        var g = Guard{ .strict = strict, .dir = gdir, .line = @intCast(line), .letter = l, .at = @intCast(at), .text = undefined, .lo = 0, .hi = 0 };
+        const cells = pos.cells[gdir][line * N ..][0..N];
         const ext = runThrough(cells, at, g.letter, &g.text);
         g.lo = @intCast(ext[0]);
         g.hi = @intCast(ext[1]);
-        a.mids[a.n_mid] = g;
-        a.line_mid[gdir][i] = a.n_mid;
-        a.n_mid += 1;
+        a.line_guards[gdir][line] |= @as(u64, 1) << @intCast(a.n_guards);
+        a.guards[a.n_guards] = g;
+        a.n_guards += 1;
         // A tile just beyond either end joins the run (and any run past it).
         for ([2]bool{ true, false }) |low| {
             if (low and ext[0] == 0) continue;
             if (!low and ext[1] == N - 1) continue;
             const j = if (low) ext[0] - 1 else ext[1] + 1;
-            const sq = if (gdir == 0) i * N + j else j * N + i;
+            const jsq = if (gdir == 0) line * N + j else j * N + line;
             var tmp = cells.*;
             var allowed: u32 = 0;
             for (0..26) |x| {
                 tmp[j] = rules.cellOf(@intCast(x), false);
                 var text: [N]u5 = undefined;
                 const e = runThrough(&tmp, at, g.letter, &text);
-                if (isSubstring(lex, text[0 .. e[1] - e[0] + 1])) allowed |= @as(u32, 1) << @intCast(x);
+                const run = text[0 .. e[1] - e[0] + 1];
+                if (if (strict) lex.contains(run) else isSubstring(lex, run)) allowed |= @as(u32, 1) << @intCast(x);
             }
-            a.restrict[sq] &= allowed;
+            a.restrict[jsq] &= allowed;
         }
     }
 
@@ -670,13 +817,11 @@ pub const Active = struct {
     /// hook line can extend a tail by several tiles and are checked here.
     pub fn hookDelta(a: *const Active, pos: *const board.Position, c: *const movegen.Candidate) ?Delta {
         var d = Delta{};
-        if (a.n_mid != 0) {
-            const mi = a.line_mid[c.dir][c.line];
-            if (mi != none) {
-                const g = &a.mids[mi];
-                if (c.end + 1 == g.at or c.start == g.at + 1) {
-                    if (!a.midOk(pos, c, g)) return null;
-                }
+        var gm = a.line_guards[c.dir][c.line];
+        while (gm != 0) : (gm &= gm - 1) {
+            const g = &a.guards[@ctz(gm)];
+            if (c.end + 1 == g.at or c.start == g.at + 1) {
+                if (!a.guardOk(pos, c, g)) return null;
             }
         }
         if (a.n_hooks == 0) return d;
@@ -704,8 +849,8 @@ pub const Active = struct {
         return d;
     }
 
-    /// A play along a middle guard's line that ends next to its square.
-    fn midOk(a: *const Active, pos: *const board.Position, c: *const movegen.Candidate, g: *const MidGuard) bool {
+    /// A play along a guard's line that ends next to its square.
+    fn guardOk(a: *const Active, pos: *const board.Position, c: *const movegen.Candidate, g: *const Guard) bool {
         var cells = pos.cells[c.dir][@as(usize, c.line) * N ..][0..N].*;
         var it = c.new_mask;
         while (it != 0) : (it &= it - 1) {
@@ -714,7 +859,8 @@ pub const Active = struct {
         }
         var text: [N]u5 = undefined;
         const ext = runThrough(&cells, g.at, g.letter, &text);
-        return isSubstring(a.lex.?, text[0 .. ext[1] - ext[0] + 1]);
+        const run = text[0 .. ext[1] - ext[0] + 1];
+        return if (g.strict) a.lex.?.contains(run) else isSubstring(a.lex.?, run);
     }
 
     /// A play along hook h's line whose word touches the finish square.
@@ -759,11 +905,58 @@ pub const Active = struct {
     }
 };
 
+/// Whether letter `l` can still be laid on the empty square `sq`. A play
+/// across or down puts it there with the perpendicular run through the
+/// square as its cross word. That run must make a word with `l` now (the
+/// cross-check), or it must be able to grow first: one of its end squares
+/// is empty and not held empty by a plan, and the run with `l` is part of
+/// some word. The square is lost only when neither direction can work.
+fn placeable(pos: *const board.Position, lex: ?*const Lexicon, sq: usize, l: u5, held: *const [NN]bool) bool {
+    const r = sq / N;
+    const c = sq % N;
+    const bit = @as(u32, 1) << l;
+    for (0..2) |d| {
+        if (pos.xmask[d][if (d == 0) sq else c * N + r] & bit != 0) return true;
+        const lx = lex orelse continue;
+        // The cross word of a play in direction d runs the other way.
+        const row_run = d == 1;
+        const line = if (row_run) r else c;
+        const at = if (row_run) c else r;
+        const cells = pos.cells[if (row_run) 0 else 1][line * N ..][0..N];
+        var text: [N]u5 = undefined;
+        const ext = runThrough(cells, at, l, &text);
+        var grows = false;
+        for ([2]isize{ @as(isize, @intCast(ext[0])) - 1, @as(isize, @intCast(ext[1])) + 1 }) |e| {
+            if (e < 0 or e >= N) continue;
+            const eu: usize = @intCast(e);
+            if (!held[if (row_run) line * N + eu else eu * N + line]) grows = true;
+        }
+        if (grows and isSubstring(lx, text[0 .. ext[1] - ext[0] + 1])) return true;
+    }
+    return false;
+}
+
+/// Every empty setup and tail square of `p` can still take its letter.
+fn targetsPlaceable(p: *const Plan, pos: *const board.Position, lex: ?*const Lexicon, held: *const [NN]bool) bool {
+    var it = p.setup() & ~p.filled(pos);
+    while (it != 0) : (it &= it - 1) {
+        const i: usize = @ctz(it);
+        if (!placeable(pos, lex, p.square(i), p.word[i], held)) return false;
+    }
+    for (p.tails[0..p.n_tails]) |*t| {
+        for (0..t.len) |j| {
+            const sq = p.tailSquare(t, j);
+            if (pos.cells[0][sq] == 0 and !placeable(pos, lex, sq, t.letters[j], held)) return false;
+        }
+    }
+    return true;
+}
+
 /// Work out which plans are live in `pos` and what they demand. A plan is
-/// dropped when its remaining setup letters can no longer be supplied, or
-/// when one of its hooks can never become a word. A letter with no natural
-/// tiles to spare beyond the open setup squares is allowed only on those
-/// squares.
+/// dropped when one of its target squares can no longer take its letter,
+/// when its remaining letters can no longer be supplied, or when one of its
+/// hooks can never become a word. A letter with no natural tiles to spare
+/// beyond the open target squares is allowed only on those squares.
 pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ctx: Context) Active {
     std.debug.assert(plans.len <= max_plans);
     var a = Active{ .n_plans = @intCast(plans.len), .mode = ctx.hooks, .aff = ctx.affixes };
@@ -772,31 +965,33 @@ pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ct
         if (!p.done(pos)) live |= @as(u8, 1) << @intCast(i);
     }
     live &= ~dropped;
-    // A setup square whose letter no play can place (it fits neither the
-    // across nor the down cross-check) can never be filled.
+    // Squares the live plans keep empty until their finishes.
+    var held: [NN]bool = @splat(false);
     for (plans, 0..) |*p, pi| {
         if ((live >> @intCast(pi)) & 1 == 0) continue;
-        var it = p.setup() & ~p.filled(pos);
-        while (it != 0) : (it &= it - 1) {
-            const i: usize = @ctz(it);
-            const sq = p.square(i);
-            const bit = @as(u32, 1) << p.word[i];
-            if (pos.xmask[0][sq] & bit == 0 and pos.xmask[1][(sq % N) * N + sq / N] & bit == 0) {
-                live &= ~(@as(u8, 1) << @intCast(pi));
-                break;
-            }
+        var it = p.finish;
+        while (it != 0) : (it &= it - 1) held[p.square(@ctz(it))] = true;
+        for (p.tails[0..p.n_tails]) |*t| {
+            if (p.tailBeyond(t)) |sq| held[sq] = true;
         }
     }
+    for (plans, 0..) |*p, pi| {
+        if ((live >> @intCast(pi)) & 1 == 0) continue;
+        if (!targetsPlaceable(p, pos, ctx.lex, &held)) live &= ~(@as(u8, 1) << @intCast(pi));
+    }
 
-    // Hooks of finish squares (when hooks are on) and guards of unfilled
-    // setup squares (whenever the affix sets are there), for edge lanes.
+    // Hooks of finish squares without tails (when hooks are on) and guards
+    // of unfilled setup squares (whenever the affix sets are there), for
+    // edge lanes.
     const hooks_on = ctx.hooks != .off and ctx.affixes != null;
     var hk: [max_plans][N]Hook = undefined;
     var nh: [max_plans]u8 = @splat(0);
     if (ctx.affixes != null) {
         for (plans, 0..) |*p, pi| {
             if ((live >> @intCast(pi)) & 1 == 0 or p.lane.middle()) continue;
-            const squares = (if (hooks_on) p.finish else 0) | (p.setup() & ~p.filled(pos));
+            var tailed: u16 = 0;
+            for (p.tails[0..p.n_tails]) |*t| tailed |= @as(u16, 1) << @intCast(t.at);
+            const squares = (if (hooks_on) p.finish & ~tailed else 0) | (p.setup() & ~p.filled(pos));
             var it = squares;
             while (it != 0) : (it &= it - 1) {
                 const i: usize = @ctz(it);
@@ -816,6 +1011,11 @@ pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ct
             for (0..27) |t| reserve[t] += p.reserve[t];
             var it = p.setup() & ~p.filled(pos);
             while (it != 0) : (it &= it - 1) need[p.word[@ctz(it)]] += 1;
+            for (p.tails[0..p.n_tails]) |*t| {
+                for (0..t.len) |j| {
+                    if (pos.cells[0][p.tailSquare(t, j)] == 0) need[t.letters[j]] += 1;
+                }
+            }
         }
         var short: u32 = 0;
         for (0..26) |l| short += need[l] -| (pos.pool[l] -| reserve[l]);
@@ -832,7 +1032,7 @@ pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ct
                 a.spare[rules.BLANK_SLOT] = @intCast(blanks_free - short);
                 if (a.spare[rules.BLANK_SLOT] < 7) a.tight |= @as(u32, 1) << rules.BLANK_SLOT;
             }
-            // Scarce setup letters may go only where a setup square wants them.
+            // Scarce letters may go only where a target square wants them.
             for (0..26) |l| {
                 if (need[l] == 0 or (pos.pool[l] -| reserve[l]) > need[l]) continue;
                 const bit = @as(u32, 1) << @intCast(l);
@@ -844,6 +1044,11 @@ pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ct
                         const j: usize = @ctz(it);
                         if (p.word[j] == l) a.restrict[p.square(j)] |= bit;
                     }
+                    for (p.tails[0..p.n_tails]) |*t| {
+                        for (0..t.len) |j| {
+                            if (t.letters[j] == l) a.restrict[p.tailSquare(t, j)] |= bit;
+                        }
+                    }
                 }
             }
             break;
@@ -852,35 +1057,111 @@ pub fn activate(plans: []const Plan, pos: *const board.Position, dropped: u8, ct
         live &= ~(@as(u8, 1) << @intCast(7 - @clz(live)));
     }
     a.live = live;
+    const first_live: usize = if (live == 0) 0 else @ctz(live);
     for (plans, 0..) |*p, pi| {
         if ((live >> @intCast(pi)) & 1 == 0) continue;
         p.restrictInto(&a.restrict, hooks_on, ctx.lex != null);
-        p.goalMasks(pos, &a.goal[pi]);
-        for (0..2) |d| {
-            for (0..N) |l| a.goal_any[d][l] |= a.goal[pi][d][l];
+        const scale: i32 = if (pi == first_live) 100 else ctx.later_bonus;
+        const b = @divTrunc((if (p.lane.middle()) ctx.mid_bonus else p.bonus(ctx.goal_bonus)) * scale, 100);
+        var it = p.setup();
+        while (it != 0) : (it &= it - 1) {
+            const sq = p.square(@ctz(it));
+            if (pos.cells[0][sq] != 0) {
+                a.own_bonus[pi] += b;
+                a.filled += 1;
+            } else a.addGoal(sq, b);
         }
-        const f: u8 = @popCount(p.filled(pos));
-        a.plan_filled[pi] = f;
-        a.filled += f;
-        a.bonus[pi] = if (p.lane.middle()) ctx.mid_bonus else p.bonus(ctx.goal_bonus);
-        a.bonus_now += a.bonus[pi] * f;
+        for (p.tails[0..p.n_tails]) |*t| {
+            const tb = @divTrunc(p.tailValue(t) * ctx.tail_bonus * scale, 100 * 100 * @as(i32, t.len));
+            for (0..t.len) |j| {
+                const sq = p.tailSquare(t, j);
+                if (pos.cells[0][sq] != 0) a.own_bonus[pi] += tb else a.addGoal(sq, tb);
+            }
+        }
+        a.bonus_now += a.own_bonus[pi];
         for (hk[pi][0..nh[pi]]) |h| a.addHook(h);
     }
     if (ctx.lex) |lex| {
         a.lex = lex;
         for (plans, 0..) |*p, pi| {
-            if ((live >> @intCast(pi)) & 1 == 0 or !p.lane.middle()) continue;
-            // Setup squares and finish squares alike: the finish's cross
-            // words must still be possible when it is played.
-            var it = (p.setup() & ~p.filled(pos)) | p.finish;
-            while (it != 0) : (it &= it - 1) {
-                if (a.n_mid == max_mid) break;
-                a.addMid(lex, p, @ctz(it), pos);
+            if ((live >> @intCast(pi)) & 1 == 0) continue;
+            if (p.lane.middle()) {
+                // Setup squares and finish squares alike: the finish's cross
+                // words must still be possible when it is played.
+                var it = (p.setup() & ~p.filled(pos)) | p.finish;
+                while (it != 0) : (it &= it - 1) {
+                    const i: usize = @ctz(it);
+                    a.addGuard(lex, 1 - p.lane.dir(), p.square(i), p.word[i], pos, false);
+                }
             }
+            // Tail squares, across their hook line.
+            for (p.tails[0..p.n_tails]) |*t| {
+                for (0..t.len) |j| {
+                    const sq = p.tailSquare(t, j);
+                    if (pos.cells[0][sq] == 0) a.addGuard(lex, p.lane.dir(), sq, t.letters[j], pos, true);
+                }
+            }
+        }
+    }
+    var open_targets: usize = 0;
+    var wanted: [NN]bool = @splat(false);
+    for (ctx.targets) |t| {
+        wanted[t.sq] = true;
+        if (pos.cells[0][t.sq] != 0) {
+            a.bonus_now += ctx.target_bonus;
+            continue;
+        }
+        open_targets += 1;
+        a.restrict[t.sq] &= @as(u32, 1) << t.letter;
+        a.addGoal(t.sq, ctx.target_bonus);
+    }
+    if (ctx.exclusive and open_targets != 0) {
+        for (0..NN) |sq| {
+            if (!wanted[sq] and !(if (ctx.free) |f| f[sq] else false)) a.restrict[sq] = 0;
         }
     }
     if (ctx.approach > 0 and live != 0) computeApproach(&a, plans, pos, ctx.approach);
     return a;
+}
+
+/// Why plan `i` is not live in `pos` (for tracing a game against plans).
+pub fn diagnose(plans: []const Plan, pos: *const board.Position, dropped: u8, ctx: Context, i: usize, w: *std.Io.Writer) !void {
+    const p = &plans[i];
+    if (p.done(pos)) return w.writeAll(if (p.completed(pos)) "finished" else "a finish square was covered");
+    if ((dropped >> @intCast(i)) & 1 != 0) return w.writeAll("given up earlier");
+    var held: [NN]bool = @splat(false);
+    for (plans) |*q| {
+        var it = q.finish;
+        while (it != 0) : (it &= it - 1) held[q.square(@ctz(it))] = true;
+        for (q.tails[0..q.n_tails]) |*t| {
+            if (q.tailBeyond(t)) |sq| held[sq] = true;
+        }
+    }
+    var it = p.setup() & ~p.filled(pos);
+    while (it != 0) : (it &= it - 1) {
+        const k: usize = @ctz(it);
+        const sq = p.square(k);
+        if (!placeable(pos, ctx.lex, sq, p.word[k], &held)) return w.print("setup square ({d},{d}) can no longer take {c}", .{ sq / N, sq % N, @as(u8, p.word[k]) + 'A' });
+    }
+    for (p.tails[0..p.n_tails]) |*t| {
+        for (0..t.len) |j| {
+            const sq = p.tailSquare(t, j);
+            if (pos.cells[0][sq] == 0 and !placeable(pos, ctx.lex, sq, t.letters[j], &held))
+                return w.print("tail square ({d},{d}) can no longer take {c}", .{ sq / N, sq % N, @as(u8, t.letters[j]) + 'A' });
+        }
+    }
+    if (ctx.affixes != null and !p.lane.middle()) {
+        var tailed: u16 = 0;
+        for (p.tails[0..p.n_tails]) |*t| tailed |= @as(u16, 1) << @intCast(t.at);
+        const hooks_on = ctx.hooks != .off;
+        var sq_it = (if (hooks_on) p.finish & ~tailed else 0) | (p.setup() & ~p.filled(pos));
+        while (sq_it != 0) : (sq_it &= sq_it - 1) {
+            const k: usize = @ctz(sq_it);
+            const h = computeHook(p, i, k, pos, ctx, (p.finish >> @intCast(k)) & 1 == 0);
+            if (h.dead) return w.print("the hook at lane square {d} can never be a word", .{k});
+        }
+    }
+    return w.writeAll("short of tiles, together with the other plans");
 }
 
 fn manhattan(a: usize, b: usize) i32 {
@@ -894,8 +1175,8 @@ fn manhattan(a: usize, b: usize) i32 {
 /// Distance of each unfilled setup square to the nearest tile (to the
 /// centre on an empty board), and what a tile on each empty square saves.
 fn computeApproach(a: *Active, plans: []const Plan, pos: *const board.Position, w: i32) void {
-    var targets: [3 * N]usize = undefined;
-    var excess: [3 * N]i32 = undefined;
+    var targets: [64]usize = undefined;
+    var excess: [64]i32 = undefined;
     var nt: usize = 0;
     var tiles: [NN]u8 = undefined;
     var n_tiles: usize = 0;
@@ -906,19 +1187,32 @@ fn computeApproach(a: *Active, plans: []const Plan, pos: *const board.Position, 
         }
     }
     const centre = rules.CENTER * N + rules.CENTER;
+    var empty_targets: [64]usize = undefined;
+    var ne: usize = 0;
     for (plans, 0..) |*p, pi| {
         if ((a.live >> @intCast(pi)) & 1 == 0) continue;
         var it = p.setup() & ~p.filled(pos);
         while (it != 0) : (it &= it - 1) {
-            if (nt == targets.len) break;
-            const s = p.square(@ctz(it));
-            var d: i32 = if (n_tiles == 0) manhattan(s, centre) + 1 else std.math.maxInt(i32);
-            for (tiles[0..n_tiles]) |t| d = @min(d, manhattan(s, t));
-            if (d <= 1) continue;
-            targets[nt] = s;
-            excess[nt] = d - 1;
-            nt += 1;
+            if (ne == empty_targets.len) break;
+            empty_targets[ne] = p.square(@ctz(it));
+            ne += 1;
         }
+        for (p.tails[0..p.n_tails]) |*t| {
+            for (0..t.len) |j| {
+                const sq = p.tailSquare(t, j);
+                if (ne == empty_targets.len or pos.cells[0][sq] != 0) continue;
+                empty_targets[ne] = sq;
+                ne += 1;
+            }
+        }
+    }
+    for (empty_targets[0..ne]) |s| {
+        var d: i32 = if (n_tiles == 0) manhattan(s, centre) + 1 else std.math.maxInt(i32);
+        for (tiles[0..n_tiles]) |t| d = @min(d, manhattan(s, t));
+        if (d <= 1) continue;
+        targets[nt] = s;
+        excess[nt] = d - 1;
+        nt += 1;
     }
     if (nt == 0) return;
     a.has_approach = true;
@@ -950,6 +1244,15 @@ pub fn reserveJointly(plans: []Plan, r: rules.Rules) MakeError!void {
                 p.blank_setup[l] += 1;
             } else return error.TilesUnavailable;
         }
+        for (p.tails[0..p.n_tails]) |*t| {
+            for (t.letters[0..t.len]) |l| {
+                if (left[l] > 0) {
+                    left[l] -= 1;
+                } else if (left[rules.BLANK_SLOT] > 0) {
+                    left[rules.BLANK_SLOT] -= 1;
+                } else return error.TilesUnavailable;
+            }
+        }
     }
     for (plans) |*p| {
         p.reserve = @splat(0);
@@ -976,7 +1279,8 @@ pub fn blanksUsed(p: *const Plan) u32 {
     return n;
 }
 
-/// Parse "row0:WORD:0,1,2,4,7,11,14".
+/// Parse "row0:WORD:0,1,2,4,7,11,14", optionally followed by tails as
+/// ":0=IFF,7=LAWLIKE" (finish square = tail letters, in board order).
 pub fn parse(text: []const u8, r: rules.Rules) !Plan {
     var it = std.mem.splitScalar(u8, text, ':');
     const lane = std.meta.stringToEnum(Lane, it.next() orelse return error.BadPlan) orelse return error.BadPlan;
@@ -987,7 +1291,24 @@ pub fn parse(text: []const u8, r: rules.Rules) !Plan {
         const v = try std.fmt.parseInt(u4, n, 10);
         finish |= @as(u16, 1) << v;
     }
-    return make(lane, word, finish, r);
+    var p = try make(lane, word, finish, r);
+    if (it.next()) |tails| {
+        var ts = std.mem.splitScalar(u8, tails, ',');
+        while (ts.next()) |spec| {
+            const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return error.BadPlan;
+            const at = try std.fmt.parseInt(u4, spec[0..eq], 10);
+            const letters_text = spec[eq + 1 ..];
+            if (letters_text.len == 0 or letters_text.len > N - 1) return error.BadPlan;
+            var letters: [N]u5 = undefined;
+            for (letters_text, 0..) |ch, i| {
+                if (!std.ascii.isAlphabetic(ch)) return error.BadPlan;
+                letters[i] = @intCast(std.ascii.toUpper(ch) - 'A');
+            }
+            if (!p.addTail(at, letters[0..letters_text.len])) return error.BadPlan;
+        }
+    }
+    if (it.next() != null) return error.BadPlan;
+    return p;
 }
 
 pub fn write(p: *const Plan, w: *std.Io.Writer) !void {
@@ -1000,6 +1321,10 @@ pub fn write(p: *const Plan, w: *std.Io.Writer) !void {
         if (!first) try w.writeByte(',');
         first = false;
         try w.print("{d}", .{@ctz(it)});
+    }
+    for (p.tails[0..p.n_tails], 0..) |*t, k| {
+        try w.print("{s}{d}=", .{ if (k == 0) ":" else ",", t.at });
+        for (t.letters[0..t.len]) |l| try w.writeByte(@as(u8, l) + 'A');
     }
 }
 
@@ -1107,12 +1432,15 @@ fn difficulty(p: *const Plan) u8 {
     return d;
 }
 
-/// True if the plans' words fit the tile set together with at most
-/// `blanks` blanks standing in.
+/// True if the plans' words and tails fit the tile set together with at
+/// most `blanks` blanks standing in.
 pub fn fitTogether(plans: []const Plan, blanks: u32) bool {
     var need: [26]u32 = @splat(0);
     for (plans) |*p| {
         for (p.word) |l| need[l] += 1;
+        for (p.tails[0..p.n_tails]) |*t| {
+            for (t.letters[0..t.len]) |l| need[l] += 1;
+        }
     }
     var short: u32 = 0;
     for (0..26) |l| short += need[l] -| rules.standard_counts[l];
@@ -1186,4 +1514,62 @@ test "hooks limit the squares beside finish squares" {
     // With hooks off the squares beside finish squares stay empty.
     const off = activate(&plans, &pos, 0, .{ .affixes = &aff });
     try std.testing.expectEqual(@as(u32, 0), off.restrict[1 * N + 0]);
+}
+
+test "tails: squares, restrictions, hook value and the plan text" {
+    const r = rules.Rules{};
+    const p = try parse("row0:MICROTECHNIQUES:0,2,7,9,11,12,14:0=IFF,7=LAWLIKE", r);
+    try std.testing.expectEqual(@as(u8, 2), p.n_tails);
+    // LAWLIKE runs down column 7 from row 1; its E lands on the centre.
+    const t = p.tailAt(7).?;
+    try std.testing.expectEqual(@as(usize, 1 * N + 7), p.tailSquare(t, 0));
+    try std.testing.expectEqual(@as(usize, 7 * N + 7), p.tailSquare(t, 6));
+    try std.testing.expectEqual(@as(?usize, 8 * N + 7), p.tailBeyond(t));
+    // CLAWLIKE through the triple word: (3 + 1+1+4+1+1+5+1) * 3.
+    try std.testing.expectEqual(@as(i32, 17 * 3), p.tailValue(t));
+    var restrict: [NN]u32 = @splat(lexicon.LETTERS);
+    p.restrictInto(&restrict, false, false);
+    try std.testing.expectEqual(@as(u32, 1 << ('L' - 'A')), restrict[1 * N + 7]);
+    try std.testing.expectEqual(@as(u32, 0), restrict[8 * N + 7]); // nothing joins the far end
+    try std.testing.expectEqual(@as(u32, 0), restrict[1 * N + 2]); // no tail at 2: kept empty
+    // A bottom lane's tail ends next to the finish square.
+    const b = try parse("row14:OXYPHENBUTAZONE:0,1,2,3,7,11,14:7=JAM", r);
+    const bt = b.tailAt(7).?;
+    try std.testing.expectEqual(@as(usize, 11 * N + 7), b.tailSquare(bt, 0));
+    try std.testing.expectEqual(@as(usize, 13 * N + 7), b.tailSquare(bt, 2));
+    try std.testing.expectEqual(@as(?usize, 10 * N + 7), b.tailBeyond(bt));
+    // Written back as parsed.
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try write(&p, &w);
+    try std.testing.expectEqualStrings("row0:MICROTECHNIQUES:0,2,7,9,11,12,14:0=IFF,7=LAWLIKE", w.buffered());
+    // Tails only at finish squares, and not on middle lanes.
+    try std.testing.expectError(error.BadPlan, parse("row0:MICROTECHNIQUES:0,2,7,9,11,12,14:1=AB", r));
+    try std.testing.expectError(error.BadPlan, parse("row7:UNPROGRESSIVELY:0,1,10,11,12,13,14:0=AB", r));
+}
+
+test "a target square stays reachable while the run beside it can still grow" {
+    const gpa = std.testing.allocator;
+    var lex = try lexicon.build(gpa, "TAB\nBAT\nAT\nTA\nKABS\n");
+    defer lex.deinit(gpa);
+    var pos = board.Position.init(.{});
+    // AB across at (7,7); A above and T below the target square (7,6).
+    for ([_][3]u8{ .{ 7, 7, 'A' }, .{ 7, 8, 'B' }, .{ 6, 6, 'A' }, .{ 8, 6, 'T' } }) |t| {
+        const c = rules.cellOf(@intCast(t[2] - 'A'), false);
+        pos.cells[0][@as(usize, t[0]) * N + t[1]] = c;
+        pos.cells[1][@as(usize, t[1]) * N + t[0]] = c;
+        pos.tiles_on_board += 1;
+    }
+    pos.recomputeCrossChecks(&lex);
+    var held: [NN]bool = @splat(false);
+    const sq = 7 * N + 6;
+    // T makes TAB across: fine now.
+    try std.testing.expect(placeable(&pos, &lex, sq, 'T' - 'A', &held));
+    // X: XAB and AXT are parts of no word, however the runs grow.
+    try std.testing.expect(!placeable(&pos, &lex, sq, 'X' - 'A', &held));
+    // K: KAB is not a word yet, but KABS is, while the row can still grow.
+    try std.testing.expect(placeable(&pos, &lex, sq, 'K' - 'A', &held));
+    held[7 * N + 5] = true;
+    held[7 * N + 9] = true;
+    try std.testing.expect(!placeable(&pos, &lex, sq, 'K' - 'A', &held));
 }

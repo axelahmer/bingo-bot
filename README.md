@@ -9,12 +9,17 @@ Beaman's cooperative game of 4,142 points (1974), Jeff Grant's 4,207 with
 99 tiles (1979), and Grant's solitaire game of 4,454 using all 100 tiles
 (1981), later raised to 4,470.
 
-Best found so far (SOWPODS, full rules, two blanks): 3,828 in solitaire and
-3,816 for two cooperating players, both in `results/` (see Search). The
-best single play found is OXYPHENBUTAZONE for 1,619. The record with
-tournament (Collins) words is Nathan Hedt's 4,044 from 99 tiles (2014);
-our engine replays it exactly (`results/hedt-4044.txt`). Every record we
-know of, by type and word list, is in [RECORDS.md](RECORDS.md).
+Best found so far (SOWPODS, full rules, two blanks):
+- **Our own design:** 3,864 in solitaire and 3,844 for two cooperating
+  players. The best single play found is OXYPHENBUTAZONE for 1,619.
+- **Hedt's board:** 4,049 in solitaire, using all 100 tiles. This is
+  Nathan Hedt's 2014 record board (4,044 from 99 tiles, Collins words),
+  played in an order our search found.
+- **Hedt's own order:** his order plus the leftover O gives 4,054, the
+  score he reported without moves.
+
+All of these games are in `results/` and replay under `bingo check`. Every
+record we know of, by type and word list, is in [RECORDS.md](RECORDS.md).
 
 `solver.py` is the 2023 Python experiment. It is kept unchanged as the
 reference implementation and the performance baseline. `src/` is the Zig
@@ -30,12 +35,15 @@ Needs Zig 0.17.1 (`pip install ziglang==0.17.1` also provides it).
 The first command that needs the lexicon builds `sowpods.gaddag` from
 `sowpods.txt` (about 1.6 s) and reuses it afterwards.
 
-    zig-out/bin/bingo search --players 1 --hooks strict --per-signature 8 --seeds 2 --top 16 --out best.txt
+    zig-out/bin/bingo search --players 1 --hooks prefix --per-signature 8 --seeds 2 --top 16 --out best.txt
     zig-out/bin/bingo beam --width 64 --out best.txt                 # beam search, no plans
     zig-out/bin/bingo plans --lane row0 --top 20                     # candidate 15-letter plays
     zig-out/bin/bingo rollout --games 1000 --seed 1 --out best.txt   # 2023 policy, all cores
     zig-out/bin/bingo check --game best.txt                          # replay with real racks and draws
     zig-out/bin/bingo html --game best.txt --out best.html           # a page that replays it on a board
+    zig-out/bin/bingo gif --game best.txt --out best.gif             # the same as an animated GIF
+    zig-out/bin/bingo improve --game best.txt --plan ... --jobs 12   # large-neighbourhood search from a game
+    zig-out/bin/bingo trace --game best.txt --plan ...               # when and why each plan was lost
     zig-out/bin/bingo show --game best.txt --turns 10                # the board after 10 turns
     zig-out/bin/bingo moves --game best.txt --turns 10               # every legal play there
     zig-out/bin/bingo bench --game bench/game-full.txt               # timing per turn
@@ -60,6 +68,14 @@ board, one move at a time: arrow keys step, space plays and pauses, and
 the move list jumps to any turn. Pass `--game` once per game (up to 8) to
 choose between them on the page. It needs no network: the page carries
 the moves, scores and words.
+
+`bingo gif` writes the same replay as a looping animated GIF (540 by 626
+pixels, about 15 KB a turn) for sharing. The GIF shows the board after
+each turn with the new tiles outlined, and the word, score and running
+total below. `--title` sets the line above the board, and `--delay` the
+time per turn in milliseconds (default 1000). Big plays and the final
+position stay up longer. The letters are Inter, rasterized once into
+`src/glyphs.zig` by `tools/glyphs.py`, so nothing is needed at run time.
 
 ### Records
 
@@ -99,15 +115,18 @@ only on the plans, seed and search options, never on `--jobs` or
 
 On a 12-core machine:
 
-    # many seeds of one plan set: one thread per search
-    zig-out/bin/bingo beam --players 1 --width 128 --hooks strict --letter-cost 27 \
-        --plan row0:OXYPHENBUTAZONE:0,1,3,4,7,11,14 --plan row14:SESQUISULPHIDES:0,3,4,7,9,11,14 \
-        --seed 1 --seeds 48 --jobs 12 --out best.txt
-    # many plan pairs, a few seeds each
-    zig-out/bin/bingo search --players 1 --width 128 --hooks strict --letter-cost 27 \
-        --top 48 --seeds 4 --jobs 12 --out best.txt
-    # one very wide beam: all threads in one search
-    zig-out/bin/bingo beam --players 1 --width 2048 --hooks strict --letter-cost 27 --plan ... --plan ...
+    # Hedt's three words, many seeds: one thread per search
+    P="--plan row0:MICROTECHNIQUES:0,2,7,9,11,12,14 --plan row7:UNPROGRESSIVELY:0,1,10,11,12,13,14 --plan row14:OXYPHENBUTAZONE:0,1,2,3,7,11,14"
+    zig-out/bin/bingo beam --players 1 --width 128 --hooks prefix --per-signature 4 --letter-cost 27 \
+        $P --seed 1 --seeds 48 --jobs 12 --out best.txt
+    # many plan sets, a few seeds each
+    zig-out/bin/bingo search --players 1 --width 128 --hooks prefix --per-signature 4 --letter-cost 27 \
+        --mid 2 --top 24 --seeds 4 --jobs 12 --out best.txt
+    # large-neighbourhood search from the best game so far, for hours
+    H="--plan col7:UNPROGRESSIVELY:0,1,10,11,12,13,14 --plan col0:MICROTECHNIQUES:0,2,7,9,11,12,14 --plan col14:OXYPHENBUTAZONE:0,1,2,3,7,11,14"
+    zig-out/bin/bingo improve --players 1 --game results/hedt-4054.txt --hooks prefix \
+        --goal-bonus 0 --mid-bonus 0 --width 256 $H --rounds 500 --jobs 12 \
+        --free-plays 6 --radius 3 --seed 1 --out better.txt
 
 The beam is chaotic, so many seeds at a moderate width are a better use of
 cores than one very wide beam: width 512 did worse than 256 on the best
@@ -236,15 +255,20 @@ Three changes made the plans pay off.
   lane), and plays along the run are checked the same way. The hook points
   a position already has count in its ranking, so the beam builds the hooks
   it can see. `--hooks prefix` also allows prefixes that are not yet words,
-  with a ranking penalty for each; it gave the same results.
+  with a ranking penalty for each. It first seemed to make no difference,
+  but strict hooks rule out the record games' lines: Hedt builds MIFF as
+  MIF first, and QAT as QA. With today's code prefix hooks are better on
+  our own plans too (see "Designed hooks, board targets and Hedt's
+  board").
 - **Guards.** Unfilled setup squares get the same rule, scoring nothing, so
   that their letter can always still be placed. Before guards, a blank Q
   above a setup O ended a plan, because no word ends in QO. A setup square
   on the middle row has runs on both sides, so its guard asks only for a
   substring of some word. The GADDAG answers that directly: a path from the
   root spelling the string backwards exists only for substrings of words. A
-  plan is also dropped as soon as one of its setup letters fits neither the
-  across nor the down cross-check.
+  plan is also dropped when one of its setup letters can never be laid:
+  it fits neither cross-check, and neither run beside it can still grow
+  into a word.
 - **Diversity** (`--per-signature K`). A layer's best positions tend to
   share one line of setup, and when it fails they all fail. This keeps at
   most K positions per layer with the same filled setup squares.
@@ -347,6 +371,107 @@ the first letters of a top-row word and onto the last letters of a
 bottom-row word) and allows 4-letter setup runs on the edges by default
 (`--max-run 4`), which MICROTECHNIQUES needs for ROTE.
 
+### Designed hooks, board targets and Hedt's board
+
+**Why two x27 plays and one x9.** There are eight triple-word squares, and
+a premium counts only for the play that covers it, so each one multiplies
+exactly one play. A 15-letter word on an edge row takes three of them
+(x27), and one on the middle row takes the other two (x9; the centre was
+covered by the first play). Two opposite edges and the middle row use all
+eight, and no other split comes close: a second word on an adjacent edge
+shares a corner and gets x9 at best. A x27 play is worth 1,200 to 1,600
+points against about 30 for a typical play, so a game without all three
+needs about 1,500 points from elsewhere. Every record game has this
+structure.
+
+`--drop-penalty V` (default 2000 for `search`) is the pruning that follows
+from this. A line that loses one of its planned words drops V points per
+lost word in the ranking. It survives only when the beam has nothing better,
+so the search never ends empty-handed. A hard prune ended with no game at
+all in our tests, once every line had lost something.
+
+**Designed hooks.** A plan can name hooks as tails, words laid beside a
+finish square so the finishing tile makes a chosen cross word:
+
+    --plan row0:MICROTECHNIQUES:0,2,7,9,11,12,14:0=IFF,7=LAWLIKE
+
+This sets up MIFF and CLAWLIKE down the board. LAWLIKE, Hedt's first play,
+ends on the centre square. Tail squares behave like setup squares:
+- they take only their letter;
+- they earn a share of the hook's points in the ranking (`--tail-bonus`, in
+  percent);
+- the finish waits until they are full;
+- the square past a tail's end stays empty;
+- a tile placed beside an empty tail square must make a whole word with
+  its letter.
+
+With Hedt's hooks as tails our search reproduced his MICROTECHNIQUES for
+exactly 1,325 and his OXYPHENBUTAZONE for exactly 1,586, though not both in
+one game. The top edge needs a connector word across row 1, as his
+ALIENAGE does: it supplies the second letters of four hooks and three
+setup squares at once.
+
+**Board targets.** `--target ROW,COL,across|down,WORD` fixes a word on the
+board. `--target-game F` fixes every tile of game F's final board and keeps
+every other square empty until they are all filled. The search then
+replays that board in the best order it can find, and places any tiles
+left over.
+
+Re-sequencing Hedt's board this way gave **4,049 with all 100 tiles**
+(`results/solitaire-4049-hedt-board.txt`). That beats his published 4,044,
+but only after two changes:
+- strict hooks forbid his line (MIF, QA);
+- the setup bonus had to be set to 0 (`--goal-bonus 0 --mid-bonus 0`). The
+  default 200 per setup square made the beam fill setup squares first and
+  lose his strong opening (LAWLIKE 86, PROGRESS 62, UNPROGRESSIVELY 302 by
+  turn 3). It scored 3,862.
+
+His own order scores 5 more: IF then FA makes 35 where our IFF makes 30.
+His game plus the leftover O, which is worth 10 at most (OS), gives 4,054,
+the score he reported (`results/hedt-4054.txt`).
+
+**Learning targets: large-neighbourhood search.** `bingo improve --game G`
+treats the best game so far as the target and searches around it. Each
+search in a round:
+1. frees the tiles of 1 to `--free-plays` random plays (never a planned
+   finish) and the empty squares within `--radius` of them;
+2. keeps every other tile as a target;
+3. starts from the game's position before its first freed play, and
+   beam-searches the rest.
+
+Rounds run `--jobs` searches at once, and any better game becomes the next
+target, so the targets are learned from the search's own results. From
+Hedt's 4,054 it found nothing better in 12 rounds of 4 searches (width 256,
+radius 2). That is a job for many cores and hours.
+
+**Results with prefix hooks.** Our own three plans in our orientation,
+letter cost 27, `--per-signature 4`, 8 seeds:
+
+| setting | scores | best |
+|---|---|---:|
+| solitaire, width 64, strict hooks | 3,125 to 3,822, most near 3,800 | 3,822 |
+| solitaire, width 64, prefix hooks | 3,189 to 3,854, most near 3,840 | 3,854 |
+| solitaire, width 128, prefix hooks | 3,584 to 3,864 | **3,864** |
+| two players, width 64, prefix hooks | 2,720 to 3,844 | **3,844** |
+
+The two bold games are `results/solitaire-3864.txt` and
+`results/two-player-3844.txt`.
+
+**Bugs found on the way:**
+- *Plans dropped too early.* A plan was dropped as soon as a setup letter
+  failed both cross-checks now, even when the run beside the square could
+  still grow into a word.
+- *Finishes took other plans' tiles.* A finish took any natural tile in the
+  pool, including ones reserved for another plan's finish. The other plan
+  then needed a blank that nothing had kept back.
+- *Finished games dropped.* A layer stopped reading candidates once it was
+  full, so a game that went out with a lower rank was never recorded.
+- *Candidate words cut short.* `search` stopped collecting a word's
+  alternative finish squares once 80 words had been seen.
+
+`bingo trace --game G --plan ...` replays a game against plans and reports
+when each one stopped being reachable, and why.
+
 ### Published records
 
 The published records, with their word lists, methods and sources, are in
@@ -374,19 +499,26 @@ impossible: when OXYPHENBUTAZONE is played only 12 tiles are unplayed, so
 the bag is empty and whoever plays it holds exactly those 7 tiles and goes
 out, yet OB has to follow it.
 
-Where that leaves us. In solitaire our 3,828 is 216 points short of Hedt's
-4,044. For two players our 3,816 beats the 3,674 SOWPODS game, but the
-Facebook game (4,012 together, with TWL06 words, nearly all of which are
-in Collins) is 196 points ahead. Our best single play, 1,619, is about
-170 points short of the Collins records; the gap is hooks.
+Where that leaves us:
+- **Solitaire.** Our own design reaches 3,864, which is 180 short of Hedt's
+  4,044. Our order of his board scores 4,049 with all 100 tiles: above his
+  published game, but 5 below the 4,054 that his own order and the last O
+  give.
+- **Two players.** Our 3,844 beats the 3,674 SOWPODS game. The Facebook
+  game (4,012 together, with TWL06 words, nearly all of which are in
+  Collins) is still 168 points ahead.
+- **Single play.** Our best, 1,619, is about 170 points short of the
+  Collins records. The gap is hooks.
 
 What limits the search now:
 
-- **Hooks.** Hooks are found, not designed. In the 3,816 game the edge
-  finishes carry 35 and 12 points of them; in Hedt's game 114
-  (MIFF, CLAWLIKE, NE, QAT, UG) and 78 (JAMB, DITZ, DE). The record single
-  plays carry 270 or more, from seven long hooks packed into one dense
-  block, which needs a constraint solver to design.
+- **Hooks.** Tails let us name hooks, but choosing them is still by hand.
+  In the 3,816 game the edge finishes carry 35 and 12 points of hooks; in
+  Hedt's game 114 (MIFF, CLAWLIKE, NE, QAT, UG) and 78 (JAMB, DITZ, DE). His
+  hooks also need connector words (ALIENAGE, IMMANTLED) that a free beam
+  rarely finds. The record single plays carry 270 or more, from seven long
+  hooks packed into one dense block, which needs a constraint solver to
+  design.
 - **Timing of the spine.** Our searches play the x9 word at turns 16 to 25;
   the record games play it by turn 4, and their first play is already a
   hook for an edge word (Hedt's LAWLIKE, later CLAWLIKE).
@@ -563,12 +695,15 @@ Fixed in the port, still present in `solver.py`:
 
 ## Next steps
 
-- **Design the hooks.** The record plays get 270 points or more from seven
-  long hooks packed into one dense block. Finding such a block is a small
-  crossword-construction problem (a SAT or constraint search over the
-  squares beside the lane, as Lucassen did for one play). Its letters can
-  then become setup squares of the plan, which the beam already knows how
-  to fill.
+- **Design the hooks.** Tails and targets can now carry a design to the
+  beam. What is missing is choosing it: for each finish square, a hook
+  word and a connector word across row 1 (or 13) that satisfies every
+  column at once. This is a small crossword-construction problem (a SAT or
+  constraint search over the squares beside the lane, as Lucassen did for
+  one play).
+- **Run `improve` for hours.** On 12 cores, `--jobs 12` runs 12
+  neighbourhoods per round. Wider neighbourhoods (`--free-plays 6
+  --radius 3`) can change the shape of the board.
 - **A third big play that does not split the board.** Row 7 between (7,0)
   and (7,14) gives a x9 play worth 300 to 500 points, but a row-7 plan
   walls off the two halves until it is played. Plans that open late, after

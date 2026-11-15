@@ -12,6 +12,7 @@ const search = @import("search.zig");
 const beam = @import("beam.zig");
 const planmod = @import("plan.zig");
 const affix = @import("affix.zig");
+const gif = @import("gif.zig");
 
 const Lexicon = lexicon.Lexicon;
 const N = rules.N;
@@ -30,7 +31,13 @@ const usage =
     \\            third on row 7, and beam-search each
     \\  rollout   play games with the 2023 annealed-softmax policy
     \\  check     replay a game under the full rules with real racks and draws
+    \\  trace     replay a game against plans (--plan) and say when and why each
+    \\            plan stops being reachable
+    \\  improve   large-neighbourhood search from --game: free the tiles of a few
+    \\            of its plays, keep the rest of its board as targets, search
+    \\            again (--jobs at a time), keep any better game, repeat
     \\  html      write a page that replays one or more games (--game, repeatable)
+    \\  gif       write an animated GIF of --game to --out (--title, --delay)
     \\  show      print the position after a game's turns
     \\  moves     list every legal play for the player to move
     \\  bench     time move generation at each turn of a game
@@ -55,7 +62,27 @@ const usage =
     \\  --per-size K    beam: plays of each size kept per position (default 8)
     \\  --blank-keep V  beam: ranking bonus per unplayed blank (default 0)
     \\  --plan P        beam: set up the play P, e.g. row0:OXYPHENBUTAZONE:0,1,2,4,7,11,14
-    \\                  (lane:word:finish squares); up to 4
+    \\                  (lane:word:finish squares); up to 4. Designed hooks follow
+    \\                  as :SQUARE=TAIL,..., e.g. row0:...:0=IFF,7=LAWLIKE makes the
+    \\                  finish's M and C form MIFF and CLAWLIKE down the board
+    \\  --tail-bonus P  beam: ranking bonus for a tail's squares, in percent of its
+    \\                  hook's points (default 100)
+    \\  --target T      beam: a word the board must hold, ROW,COL,across|down,WORD
+    \\                  (repeatable): its squares take only its letters
+    \\  --target-game F beam: every tile of game F's final board as a target, and
+    \\                  no other square used until they are all filled: the search
+    \\                  builds that board again in its own order
+    \\  --target-bonus V  beam: ranking bonus per filled target square (default 30)
+    \\  --rounds N      improve: rounds of --jobs searches (default 10)
+    \\  --free-plays K  improve: at most K plays freed per search (default 3)
+    \\  --radius R      improve: empty squares within R of a freed tile are free
+    \\                  too (default 1)
+    \\  --drop-penalty V  beam: ranking penalty per planned play a line has lost
+    \\                  (default 0; search 2000, so such lines survive only when
+    \\                  no line with all its plans does)
+    \\  --later-bonus P  beam: setup and tail bonuses of the plans after the first
+    \\                  unfinished one, in percent (default 100); lower builds the
+    \\                  plans one at a time, in the order given
     \\  --goal-bonus V  beam: ranking bonus per filled setup square (default 200;
     \\                  a third of it for row 7 and column 7)
     \\  --hooks H       beam: off (default) keeps the squares beside finish squares
@@ -89,6 +116,9 @@ const usage =
     \\  --threads N     worker threads in all (default: all cores)
     \\  --seed S        random seed
     \\  --reps N        timing repetitions per position for bench
+    \\  --title T       gif: the line above the board (default: the file's name)
+    \\  --delay MS      gif: time per turn (default 1000; big plays and the end
+    \\                  stay up longer)
     \\  --out PATH      write the best rollout game to PATH
     \\  --count         moves: print only the count and timing
     \\
@@ -120,6 +150,18 @@ const Options = struct {
     approach: i32 = 0,
     per_signature: usize = 0,
     letter_cost: i32 = 0,
+    tail_bonus: i32 = 100,
+    target_texts: [16][]const u8 = undefined,
+    n_targets: usize = 0,
+    target_game: ?[]const u8 = null,
+    target_bonus: i32 = 30,
+    rounds: usize = 10,
+    title: ?[]const u8 = null,
+    delay_ms: u32 = 1000,
+    free_plays: usize = 3,
+    radius: usize = 1,
+    drop_penalty: ?i32 = null,
+    later_bonus: i32 = 100,
     jobs: usize = 1,
     mid: usize = 0,
     mid_bonus: i32 = 20,
@@ -196,6 +238,31 @@ fn parseArgs(args: []const [:0]const u8) !Options {
         } else if (std.mem.eql(u8, a, "--jobs")) {
             o.jobs = try std.fmt.parseInt(usize, v, 10);
             if (o.jobs == 0) return error.Usage;
+        } else if (std.mem.eql(u8, a, "--tail-bonus")) {
+            o.tail_bonus = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--target")) {
+            if (o.n_targets == o.target_texts.len) return error.Usage;
+            o.target_texts[o.n_targets] = v;
+            o.n_targets += 1;
+        } else if (std.mem.eql(u8, a, "--target-game")) {
+            o.target_game = v;
+        } else if (std.mem.eql(u8, a, "--target-bonus")) {
+            o.target_bonus = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--title")) {
+            o.title = v;
+        } else if (std.mem.eql(u8, a, "--delay")) {
+            o.delay_ms = try std.fmt.parseInt(u32, v, 10);
+        } else if (std.mem.eql(u8, a, "--rounds")) {
+            o.rounds = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--free-plays")) {
+            o.free_plays = try std.fmt.parseInt(usize, v, 10);
+            if (o.free_plays == 0) return error.Usage;
+        } else if (std.mem.eql(u8, a, "--radius")) {
+            o.radius = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--drop-penalty")) {
+            o.drop_penalty = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--later-bonus")) {
+            o.later_bonus = try std.fmt.parseInt(i32, v, 10);
         } else if (std.mem.eql(u8, a, "--letter-cost")) {
             o.letter_cost = try std.fmt.parseInt(i32, v, 10);
         } else if (std.mem.eql(u8, a, "--mid-bonus")) {
@@ -266,6 +333,8 @@ pub fn main(init: std.process.Init) !void {
         try writeSummary(out, &g);
     } else if (std.mem.eql(u8, cmd, "check")) {
         try cmdCheck(gpa, io, &lex, opts, out);
+    } else if (std.mem.eql(u8, cmd, "trace")) {
+        try cmdTrace(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "moves")) {
         try cmdMoves(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "bench")) {
@@ -280,6 +349,10 @@ pub fn main(init: std.process.Init) !void {
         try cmdSearch(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "html")) {
         try cmdHtml(gpa, io, &lex, opts, out);
+    } else if (std.mem.eql(u8, cmd, "gif")) {
+        try cmdGif(gpa, io, &lex, opts, out);
+    } else if (std.mem.eql(u8, cmd, "improve")) {
+        try cmdImprove(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "verify")) {
         try cmdVerify(gpa, io, &lex, opts, out);
     } else {
@@ -734,16 +807,7 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     const start = try loadGame(gpa, io, lex, opts, &prefix);
     const nthreads = @max(1, if (opts.threads != 0) opts.threads else std.Thread.getCpuCount() catch 1);
     var plans: [4]planmod.Plan = undefined;
-    for (opts.plan_texts[0..opts.n_plans], 0..) |t, i| {
-        plans[i] = planmod.parse(t, opts.rules) catch |err| {
-            std.debug.print("bad plan {s}: {t}\n", .{ t, err });
-            return err;
-        };
-    }
-    planmod.reserveJointly(plans[0..opts.n_plans], opts.rules) catch |err| {
-        std.debug.print("the plans need more tiles than the set has: {t}\n", .{err});
-        return err;
-    };
+    _ = try parsePlans(lex, opts, &plans);
     for (plans[0..opts.n_plans]) |*p| {
         try out.writeAll("plan ");
         try planmod.write(p, out);
@@ -751,7 +815,13 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     }
     var aff = try loadAffixes(gpa, io, opts, opts.n_plans > 0);
     defer if (aff) |*a| a.deinit(gpa);
-    const base = beamOptions(opts, if (aff) |*a| a else null, nthreads);
+    var base = beamOptions(opts, if (aff) |*a| a else null, nthreads);
+    base.drop_penalty = opts.drop_penalty orelse 0;
+    const targets = try loadTargets(gpa, io, lex, opts);
+    defer gpa.free(targets);
+    base.targets = targets;
+    base.exclusive = opts.target_game != null;
+    if (targets.len != 0) try out.print("{d} target squares\n", .{targets.len});
     if (opts.seeds > 1 or opts.jobs > 1) {
         // Several seeds: run them as a pool of jobs and keep the best game.
         const tasks = try gpa.alloc(Task, @max(1, opts.seeds));
@@ -790,6 +860,267 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     if (opts.out) |path| try writeGameFile(io, lex, opts, path, prefix.items, &start, res.turns, plans[0..opts.n_plans], opts.seed, best.total(), res.seconds);
 }
 
+/// Parse --plan options, check their tails against the word list, and share
+/// out the tiles between them.
+fn parsePlans(lex: *const Lexicon, opts: Options, plans: *[4]planmod.Plan) ![]planmod.Plan {
+    for (opts.plan_texts[0..opts.n_plans], 0..) |t, i| {
+        plans[i] = planmod.parse(t, opts.rules) catch |err| {
+            std.debug.print("bad plan {s}: {t}\n", .{ t, err });
+            return err;
+        };
+        if (!plans[i].tailsAreWords(lex)) {
+            std.debug.print("bad plan {s}: a tail or its hook is not a word\n", .{t});
+            return error.BadPlan;
+        }
+    }
+    planmod.reserveJointly(plans[0..opts.n_plans], opts.rules) catch |err| {
+        std.debug.print("the plans need more tiles than the set has: {t}\n", .{err});
+        return err;
+    };
+    return plans[0..opts.n_plans];
+}
+
+/// Board targets from --target words and the final board of --target-game.
+fn loadTargets(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options) ![]planmod.Target {
+    var out: std.ArrayList(planmod.Target) = .empty;
+    errdefer out.deinit(gpa);
+    for (opts.target_texts[0..opts.n_targets]) |text| {
+        var it = std.mem.splitScalar(u8, text, ',');
+        const r = std.fmt.parseInt(usize, it.next() orelse "", 10) catch return badTarget(text);
+        const c = std.fmt.parseInt(usize, it.next() orelse "", 10) catch return badTarget(text);
+        const dir_s = it.next() orelse return badTarget(text);
+        const d: u1 = if (std.mem.eql(u8, dir_s, "across")) 0 else if (std.mem.eql(u8, dir_s, "down")) 1 else return badTarget(text);
+        const word = it.next() orelse return badTarget(text);
+        if (it.next() != null or r >= N or c >= N or word.len == 0) return badTarget(text);
+        for (word, 0..) |ch, k| {
+            const rr = if (d == 0) r else r + k;
+            const cc = if (d == 0) c + k else c;
+            if (rr >= N or cc >= N or !std.ascii.isAlphabetic(ch)) return badTarget(text);
+            try out.append(gpa, .{ .sq = @intCast(rr * N + cc), .letter = @intCast(std.ascii.toUpper(ch) - 'A') });
+        }
+    }
+    if (opts.target_game) |path| {
+        var o = opts;
+        o.game = path;
+        o.turns = null;
+        o = withFileRules(gpa, io, o);
+        var turns: std.ArrayList(Turn) = .empty;
+        defer turns.deinit(gpa);
+        const g = try loadGame(gpa, io, lex, o, &turns);
+        for (g.pos.cells[0], 0..) |cell, sq| {
+            if (cell != 0) try out.append(gpa, .{ .sq = @intCast(sq), .letter = rules.letterOf(cell) });
+        }
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+fn badTarget(text: []const u8) error{BadTarget} {
+    std.debug.print("bad target {s}: expected ROW,COL,across|down,WORD\n", .{text});
+    return error.BadTarget;
+}
+
+/// Replay --game turn by turn against the plans, the way the beam search
+/// sees them, and report each plan that stops being reachable.
+fn cmdTrace(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
+    var buf: [4]planmod.Plan = undefined;
+    const plans = try parsePlans(lex, opts, &buf);
+    var aff = try loadAffixes(gpa, io, opts, true);
+    defer if (aff) |*a| a.deinit(gpa);
+    const ctx = planmod.Context{
+        .hooks = opts.hooks,
+        .affixes = if (aff) |*a| a else null,
+        .goal_bonus = opts.goal_bonus,
+        .mid_bonus = opts.mid_bonus,
+        .approach = opts.approach,
+        .tail_bonus = opts.tail_bonus,
+        .later_bonus = opts.later_bonus,
+        .lex = lex,
+    };
+    var turns: std.ArrayList(Turn) = .empty;
+    defer turns.deinit(gpa);
+    _ = try loadGame(gpa, io, lex, opts, &turns);
+    var g = Game.init(opts.rules);
+    var dropped: u8 = 0;
+    var live = planmod.activate(plans, &g.pos, dropped, ctx).live;
+    try out.print("{d} plans, live at the start: {d}\n", .{ plans.len, @popCount(live) });
+    for (turns.items, 1..) |t, k| {
+        switch (t) {
+            .pass => g.pass(),
+            .play => |m| {
+                const before = g.pos;
+                g.play(lex, &m);
+                const now = planmod.activate(plans, &g.pos, dropped, ctx).live;
+                for (plans, 0..) |*p, i| {
+                    const bit = @as(u8, 1) << @intCast(i);
+                    if (live & bit == 0 or now & bit != 0) continue;
+                    try out.print("turn {d:>2} ", .{k});
+                    try before.writePlay(&m, out);
+                    try out.writeAll(": ");
+                    try planmod.write(p, out);
+                    try out.writeAll(": ");
+                    try planmod.diagnose(plans, &g.pos, dropped, ctx, i, out);
+                    try out.writeByte('\n');
+                    if (!p.done(&g.pos)) dropped |= bit;
+                }
+                live = now;
+            },
+        }
+    }
+    try out.print("live at the end: {d}\n", .{@popCount(live)});
+}
+
+/// One search of `bingo improve`: its targets, free squares, the turns it
+/// keeps from the current game, and its result.
+const Neighbour = struct {
+    targets: std.ArrayList(planmod.Target) = .empty,
+    free: [rules.NN]bool = @splat(false),
+    freed: usize = 0,
+    /// Turns of the current game played before the first freed play.
+    keep: usize = 0,
+    start: Game = undefined,
+    opts: beam.Options = .{},
+    result: ?beam.Result = null,
+    failed: bool = false,
+
+    fn run(n: *Neighbour, gpa: Allocator, lex: *const Lexicon, io: Io) void {
+        n.result = beam.search(gpa, lex, &n.start, n.opts, null, io) catch {
+            n.failed = true;
+            return;
+        };
+    }
+};
+
+/// Large-neighbourhood search over boards. Start from --game; each round
+/// runs --jobs searches, each freeing the tiles of up to --free-plays of the
+/// current game's plays (never a planned finish) and the empty squares
+/// within --radius of them, and keeping every other tile as a target with
+/// the rest of the board fenced off until the targets are filled. A search
+/// starts from the current game's position before its first freed play.
+/// The best game of a round replaces the current one if it scores more.
+fn cmdImprove(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
+    var buf: [4]planmod.Plan = undefined;
+    const plans = try parsePlans(lex, opts, &buf);
+    var aff = try loadAffixes(gpa, io, opts, true);
+    defer if (aff) |*a| a.deinit(gpa);
+    var best_turns: std.ArrayList(Turn) = .empty;
+    defer best_turns.deinit(gpa);
+    var best_game = try loadGame(gpa, io, lex, opts, &best_turns);
+    var best_total = best_game.total();
+    const start = Game.init(opts.rules);
+    const cpus = @max(1, if (opts.threads != 0) opts.threads else std.Thread.getCpuCount() catch 1);
+    const jobs = @max(1, opts.jobs);
+    var base = beamOptions(opts, if (aff) |*a| a else null, @max(1, cpus / jobs));
+    base.plans = plans;
+    base.exclusive = true;
+    var finish_sq: [rules.NN]bool = @splat(false);
+    for (plans) |*p| {
+        var it = p.finish;
+        while (it != 0) : (it &= it - 1) finish_sq[p.square(@ctz(it))] = true;
+    }
+    try out.print("start {d} from {s}; {d} rounds of {d} searches, up to {d} plays freed, radius {d}\n", .{
+        best_total, opts.game orelse "", opts.rounds, jobs, opts.free_plays, opts.radius,
+    });
+    try out.flush();
+    var prng = std.Random.DefaultPrng.init(opts.seed);
+    const rand = prng.random();
+    const ns = try gpa.alloc(Neighbour, jobs);
+    defer gpa.free(ns);
+    for (0..opts.rounds) |round| {
+        // The plays that may be freed: every play but a planned finish.
+        var movable: std.ArrayList(usize) = .empty;
+        defer movable.deinit(gpa);
+        for (best_turns.items, 0..) |t, ti| switch (t) {
+            .play => |m| {
+                var fin = false;
+                var it = m.new_mask;
+                while (it != 0) : (it &= it - 1) {
+                    const i: usize = @ctz(it);
+                    fin = fin or finish_sq[m.row(i) * N + m.col(i)];
+                }
+                if (!fin) try movable.append(gpa, ti);
+            },
+            .pass => {},
+        };
+        for (ns, 0..) |*n, k| {
+            n.* = .{};
+            var freed_sq: [rules.NN]bool = @splat(false);
+            const want = 1 + rand.uintLessThan(usize, opts.free_plays);
+            n.keep = best_turns.items.len;
+            for (0..@min(want, movable.items.len)) |_| {
+                const ti = movable.items[rand.uintLessThan(usize, movable.items.len)];
+                const m = &best_turns.items[ti].play;
+                var it = m.new_mask;
+                while (it != 0) : (it &= it - 1) {
+                    const i: usize = @ctz(it);
+                    freed_sq[m.row(i) * N + m.col(i)] = true;
+                }
+                n.keep = @min(n.keep, ti);
+                n.freed += 1;
+            }
+            n.start = Game.init(opts.rules);
+            for (best_turns.items[0..n.keep]) |*t| switch (t.*) {
+                .play => |*m| n.start.play(lex, m),
+                .pass => n.start.pass(),
+            };
+            for (best_game.pos.cells[0], 0..) |cell, sq| {
+                if (cell != 0 and !freed_sq[sq]) try n.targets.append(gpa, .{ .sq = @intCast(sq), .letter = rules.letterOf(cell) });
+            }
+            for (0..rules.NN) |sq| {
+                if (best_game.pos.cells[0][sq] != 0 and !freed_sq[sq]) continue;
+                // Free if a freed tile lies within the radius.
+                const r0: isize = @intCast(sq / N);
+                const c0: isize = @intCast(sq % N);
+                var near = freed_sq[sq];
+                for (0..rules.NN) |q| {
+                    if (!freed_sq[q] or near) continue;
+                    const dr = @abs(r0 - @as(isize, @intCast(q / N)));
+                    const dc = @abs(c0 - @as(isize, @intCast(q % N)));
+                    near = dr + dc <= opts.radius;
+                }
+                n.free[sq] = near;
+            }
+            n.opts = base;
+            n.opts.targets = n.targets.items;
+            n.opts.free = &n.free;
+            n.opts.seed = opts.seed + round * jobs + k;
+        }
+        if (jobs == 1) {
+            ns[0].run(gpa, lex, io);
+        } else {
+            const ts = try gpa.alloc(std.Thread, jobs);
+            defer gpa.free(ts);
+            for (ts, ns) |*t, *n| t.* = try std.Thread.spawn(.{}, Neighbour.run, .{ n, gpa, lex, io });
+            for (ts) |t| t.join();
+        }
+        var round_best: ?usize = null;
+        for (ns, 0..) |*n, k| {
+            if (n.failed) return error.OutOfMemory;
+            const g = n.result.?.best orelse continue;
+            if (round_best == null or g.total() > ns[round_best.?].result.?.best.?.total()) round_best = k;
+        }
+        var line_total: i32 = 0;
+        if (round_best) |k| {
+            const res = &ns[k].result.?;
+            line_total = res.best.?.total();
+            if (line_total > best_total) {
+                best_total = line_total;
+                best_game = res.best.?;
+                best_turns.shrinkRetainingCapacity(ns[k].keep);
+                try best_turns.appendSlice(gpa, res.turns);
+                if (opts.out) |path| try writeGameFile(io, lex, opts, path, &.{}, &start, best_turns.items, plans, opts.seed, best_total, res.seconds);
+            }
+        }
+        try out.print("round {d:>3}: best of round {d:>5}, current {d:>5}\n", .{ round + 1, @as(u32, @intCast(@max(0, line_total))), @as(u32, @intCast(@max(0, best_total))) });
+        try out.flush();
+        for (ns) |*n| {
+            if (n.result) |*r| r.deinit(gpa);
+            n.targets.deinit(gpa);
+        }
+    }
+    try out.print("\nbest {d}:\n", .{best_total});
+    try writeTurns(out, lex, &start, best_turns.items, true);
+}
+
 /// Beam options from the command line (plans and seed are set per search).
 fn beamOptions(opts: Options, aff: ?*const affix.Affixes, threads: usize) beam.Options {
     return .{
@@ -806,6 +1137,10 @@ fn beamOptions(opts: Options, aff: ?*const affix.Affixes, threads: usize) beam.O
         .approach = opts.approach,
         .per_signature = opts.per_signature,
         .letter_cost = opts.letter_cost,
+        .tail_bonus = opts.tail_bonus,
+        .later_bonus = opts.later_bonus,
+        .target_bonus = opts.target_bonus,
+        .drop_penalty = opts.drop_penalty orelse 2000,
     };
 }
 
@@ -829,6 +1164,18 @@ fn writeGameFile(io: Io, lex: *const Lexicon, opts: Options, path: []const u8, p
             break;
         }
     }
+    for (plans) |*pl| {
+        if (pl.n_tails != 0) {
+            try w.print(", tail bonus {d}", .{opts.tail_bonus});
+            break;
+        }
+    }
+    const drop = opts.drop_penalty orelse @as(i32, if (std.mem.eql(u8, opts.command, "search")) 2000 else 0);
+    if (drop != 0) try w.print(", drop penalty {d}", .{drop});
+    if (opts.later_bonus != 100) try w.print(", later bonus {d}", .{opts.later_bonus});
+    for (opts.target_texts[0..opts.n_targets]) |t| try w.print(", target {s}", .{t});
+    if (opts.target_game) |t| try w.print(", target game {s}", .{std.fs.path.basename(t)});
+    if (opts.n_targets != 0 or opts.target_game != null) try w.print(", target bonus {d}", .{opts.target_bonus});
     for (plans) |*pl| {
         try w.writeAll(", plan ");
         try planmod.write(pl, w);
@@ -1125,6 +1472,118 @@ fn cmdHtml(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     try w.flush();
 }
 
+/// A number with thousands separators, e.g. 4,049.
+fn commas(buf: []u8, n: i64) []const u8 {
+    var tmp: [32]u8 = undefined;
+    const digits = std.fmt.bufPrint(&tmp, "{d}", .{@abs(n)}) catch unreachable;
+    var k: usize = 0;
+    if (n < 0) {
+        buf[k] = '-';
+        k += 1;
+    }
+    for (digits, 0..) |ch, i| {
+        if (i > 0 and (digits.len - i) % 3 == 0) {
+            buf[k] = ',';
+            k += 1;
+        }
+        buf[k] = ch;
+        k += 1;
+    }
+    return buf[0..k];
+}
+
+/// An animated GIF of --game: the empty board, the board after each turn
+/// with its new tiles marked, and the final position.
+fn cmdGif(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
+    const path = opts.game orelse return error.Usage;
+    const out_path = opts.out orelse {
+        std.debug.print("gif needs --out FILE.gif\n", .{});
+        return error.Usage;
+    };
+    var turns: std.ArrayList(Turn) = .empty;
+    defer turns.deinit(gpa);
+    const end = try loadGame(gpa, io, lex, opts, &turns);
+    const r = opts.rules;
+    const base = std.fs.path.basename(path);
+    const title = opts.title orelse base[0 .. std.mem.lastIndexOfScalar(u8, base, '.') orelse base.len];
+
+    var frames: std.ArrayList(*gif.Canvas) = .empty;
+    defer {
+        for (frames.items) |f| gpa.destroy(f);
+        frames.deinit(gpa);
+    }
+    var delays: std.ArrayList(u16) = .empty;
+    defer delays.deinit(gpa);
+    const step: u16 = @intCast(@max(1, opts.delay_ms / 10));
+    var none: [rules.NN]bool = @splat(false);
+    var replay = Game.init(r);
+    {
+        const f = try gpa.create(gif.Canvas);
+        try frames.append(gpa, f);
+        var db: [96]u8 = undefined;
+        const detail = try std.fmt.bufPrint(&db, "{d} player{s} \u{b7} words {s}", .{ r.players, if (r.players == 1) "" else "s", std.fs.path.basename(opts.words) });
+        gif.draw(f, title, &replay.pos.cells[0], &none, .{ .word = "Start", .detail = detail });
+        try delays.append(gpa, step);
+    }
+    for (turns.items, 1..) |*t, k| {
+        const f = try gpa.create(gif.Canvas);
+        try frames.append(gpa, f);
+        var fresh: [rules.NN]bool = @splat(false);
+        var nb: [32]u8 = undefined;
+        const note = try std.fmt.bufPrint(&nb, "turn {d} of {d}", .{ k, turns.items.len });
+        const mover = replay.turn;
+        switch (t.*) {
+            .pass => {
+                replay.pass();
+                gif.draw(f, title, &replay.pos.cells[0], &fresh, .{ .word = "pass", .note = note });
+                try delays.append(gpa, step);
+            },
+            .play => |*m| {
+                var wm: u32 = 1;
+                var it = m.new_mask;
+                while (it != 0) : (it &= it - 1) {
+                    const i: usize = @ctz(it);
+                    wm *= rules.premiums.word[m.dir][@as(usize, m.line) * N + i];
+                    fresh[m.row(i) * N + m.col(i)] = true;
+                }
+                replay.play(lex, m);
+                var word: [N]u8 = undefined;
+                const cells = replay.pos.cells[m.dir][@as(usize, m.line) * N ..][m.start .. @as(usize, m.end) + 1];
+                for (cells, 0..) |c, i| word[i] = board.cellChar(c);
+                var sb: [24]u8 = undefined;
+                const score = commas(&sb, m.score);
+                var tb: [24]u8 = undefined;
+                var tb2: [24]u8 = undefined;
+                var db: [128]u8 = undefined;
+                const tiles_note: []const u8 = if (m.placed == r.rack) " tiles, bingo" else if (m.placed == 1) " tile" else " tiles";
+                const detail = if (r.players == 1)
+                    try std.fmt.bufPrint(&db, "\u{d7}{d} \u{b7} {d}{s} \u{b7} total {s}", .{ wm, m.placed, tiles_note, commas(&tb, replay.total()) })
+                else
+                    try std.fmt.bufPrint(&db, "player {d} \u{b7} \u{d7}{d} \u{b7} {d}{s} \u{b7} {s} + {s}", .{ @as(u8, mover) + 1, wm, m.placed, tiles_note, commas(&tb, replay.score[0]), commas(&tb2, replay.score[1]) });
+                gif.draw(f, title, &replay.pos.cells[0], &fresh, .{ .word = word[0..cells.len], .score = score, .note = note, .detail = detail });
+                try delays.append(gpa, if (m.score >= 250) step * 5 / 2 else step);
+            },
+        }
+    }
+    {
+        const f = try gpa.create(gif.Canvas);
+        try frames.append(gpa, f);
+        var sb: [24]u8 = undefined;
+        var db: [96]u8 = undefined;
+        const detail = try std.fmt.bufPrint(&db, "{d} turns \u{b7} {d} tiles played", .{ turns.items.len, end.pos.tiles_on_board });
+        gif.draw(f, title, &end.pos.cells[0], &none, .{ .word = "Final score", .score = commas(&sb, end.total()), .detail = detail });
+        try delays.append(gpa, step * 5);
+    }
+    var file = try Io.Dir.cwd().createFile(io, out_path, .{});
+    defer file.close(io);
+    var buf: [1 << 16]u8 = undefined;
+    var fw = file.writer(io, &buf);
+    const cframes: []const *const gif.Canvas = @ptrCast(frames.items);
+    try gif.write(gpa, &fw.interface, cframes, delays.items);
+    try fw.interface.flush();
+    try out.print("wrote {s}: {d} frames, {d}x{d}\n", .{ out_path, frames.items.len, gif.width, gif.height });
+}
+
 fn cmdPlans(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
     const text = try Io.Dir.cwd().readFileAlloc(io, opts.words, gpa, .unlimited);
     defer gpa.free(text);
@@ -1166,15 +1625,15 @@ fn cmdSearch(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *I
         by_word.deinit(gpa);
     }
     for (all) |*sc| {
-        const gop = try by_word.getOrPut(gpa, sc.plan.word);
-        if (!gop.found_existing) {
-            if (by_word.count() > n_words) {
-                _ = by_word.pop();
-                break;
-            }
-            gop.value_ptr.* = .{ .estimate = sc.estimate };
+        // Plans come best first, so a word's first plan is its best; once
+        // there are enough words, later plans only add to those.
+        if (by_word.getPtr(sc.plan.word)) |b| {
+            if (sc.estimate + 60 >= b.estimate) try b.scored.append(gpa, sc.*);
+            continue;
         }
-        if (sc.estimate + 60 >= gop.value_ptr.estimate) try gop.value_ptr.scored.append(gpa, sc.*);
+        if (by_word.count() == n_words) continue;
+        try by_word.put(gpa, sc.plan.word, .{ .estimate = sc.estimate });
+        try by_word.getPtr(sc.plan.word).?.scored.append(gpa, sc.*);
     }
     var picks: std.ArrayList(planmod.Plan) = .empty;
     defer picks.deinit(gpa);
@@ -1450,5 +1909,6 @@ test {
     _ = beam;
     _ = planmod;
     _ = affix;
+    _ = gif;
     _ = @import("tests.zig");
 }

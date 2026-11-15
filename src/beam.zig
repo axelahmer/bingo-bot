@@ -61,6 +61,23 @@ pub const Options = struct {
     /// (which setup squares are filled, which plans were given up); 0 for
     /// no limit. Keeps alternative lines of setup alive.
     per_signature: usize = 0,
+    /// Ranking bonus for each tail (see plan.Tail), in percent of its hook's
+    /// points, shared among its squares.
+    tail_bonus: i32 = 100,
+    /// Ranking penalty per plan a line has lost (given up, or no longer
+    /// reachable). The records need all their big plays, so with a large
+    /// penalty such lines survive only when no line with every plan does.
+    drop_penalty: i32 = 0,
+    /// Setup and tail bonuses of the plans after the first live one, in
+    /// percent (see plan.Context.later_bonus).
+    later_bonus: i32 = 100,
+    /// Board targets (see plan.Target) and the bonus for each one filled.
+    targets: []const planmod.Target = &.{},
+    target_bonus: i32 = 0,
+    /// Keep other squares empty until every target is filled, except those
+    /// marked in `free`.
+    exclusive: bool = false,
+    free: ?*const [rules.NN]bool = null,
     /// Tie-break order between equally ranked positions; different seeds
     /// give different (each reproducible) searches.
     seed: u64 = 0,
@@ -99,7 +116,7 @@ pub const TopBySize = struct {
         var key = c.score;
         if (self.act) |a| {
             key += a.goalValue(c.dir, c.line, c.new_mask);
-            if (a.n_hooks != 0 or a.n_mid != 0) {
+            if (a.n_hooks != 0 or a.n_guards != 0) {
                 const d = a.hookDelta(self.pos.?, c) orelse return;
                 key += d.value - self.pending_penalty * d.pending;
             }
@@ -268,8 +285,18 @@ const Worker = struct {
             .goal_bonus = sh.opts.goal_bonus,
             .mid_bonus = sh.opts.mid_bonus,
             .approach = sh.opts.approach,
+            .tail_bonus = sh.opts.tail_bonus,
+            .later_bonus = sh.opts.later_bonus,
+            .targets = sh.opts.targets,
+            .target_bonus = sh.opts.target_bonus,
+            .exclusive = sh.opts.exclusive,
+            .free = sh.opts.free,
             .lex = sh.lex,
         };
+        var undone: u8 = 0;
+        for (sh.opts.plans, 0..) |*p, i| {
+            if (!p.completed(&g.pos)) undone |= @as(u8, 1) << @intCast(i);
+        }
         while (true) {
             // Live plans narrow the supply and the squares.
             var sup = g.supply();
@@ -279,7 +306,11 @@ const Worker = struct {
             n_fin = 0;
             for (sh.opts.plans, 0..) |*p, i| {
                 if ((act.live >> @intCast(i)) & 1 == 0) continue;
-                if (p.finishMove(sh.lex, g.rules, &g.pos)) |m| {
+                // The finish may take its own reserve and the spare tiles,
+                // never what the other live plans still need.
+                var avail: [27]u8 = undefined;
+                for (0..27) |t| avail[t] = @min(g.pos.pool[t] -| (act.reserve[t] - p.reserve[t]), p.reserve[t] +| act.spare[t]);
+                if (p.finishMove(sh.lex, g.rules, &g.pos, &avail)) |m| {
                     if (m.placed <= g.rack[g.turn]) {
                         finishes[n_fin] = m;
                         fin_plan[n_fin] = @intCast(i);
@@ -287,9 +318,10 @@ const Worker = struct {
                     }
                 }
             }
-            if (act.live != 0) sup.restrict = &act.restrict;
+            const steer = act.live != 0 or sh.opts.targets.len != 0;
+            if (steer) sup.restrict = &act.restrict;
             w.top.reset();
-            w.top.act = if (act.live != 0) &act else null;
+            w.top.act = if (steer) &act else null;
             w.top.pos = &g.pos;
             w.top.guard = sh.opts.guard;
             w.top.pending_penalty = sh.opts.pending_penalty;
@@ -313,9 +345,11 @@ const Worker = struct {
         }
         const total: i64 = g.total();
         const blanks_left: i32 = g.pos.pool[rules.BLANK_SLOT];
-        // What the open plans promise: their setup bonus and hook points.
+        // What the open plans promise: their setup bonus and hook points,
+        // less the price of the plans this line has lost.
         const pen = sh.opts.pending_penalty;
-        const promise: i64 = act.bonus_now + act.approach_now + act.hook_value - pen * act.hook_pending;
+        const lost: i64 = @popCount(undone & ~act.live);
+        const promise: i64 = act.bonus_now + act.approach_now + act.hook_value - pen * act.hook_pending - sh.opts.drop_penalty * lost;
         for (1..N + 1) |s| {
             for (w.top.moves[s][0..w.top.n[s]], w.top.keys[s][0..w.top.n[s]]) |*m, key| {
                 const keep = sh.opts.blank_keep * (blanks_left - blanksIn(m));
@@ -333,7 +367,7 @@ const Worker = struct {
         // A finish turns its plan's promise into its real score.
         for (finishes[0..n_fin], fin_plan[0..n_fin]) |*m, pi| {
             const keep = sh.opts.blank_keep * (blanks_left - blanksIn(m));
-            const own: i64 = act.bonus[pi] * @as(i32, act.plan_filled[pi]) + act.plan_hook_value[pi] - pen * act.plan_pending[pi];
+            const own: i64 = act.own_bonus[pi] + act.plan_hook_value[pi] - pen * act.plan_pending[pi];
             try w.out.append(w.gpa, .{
                 .rank = total + m.score + keep + promise - own,
                 .board_hash = e.board_hash ^ moveHash(m),
@@ -390,8 +424,12 @@ const Search = struct {
         var sigs: std.AutoHashMapUnmanaged(u64, u32) = .empty;
         defer sigs.deinit(s.gpa);
         for (cands) |*c| {
-            if (s.layers[t].items.len >= s.opts.width) break;
             const parent = &s.layers[c.parent_layer].items[c.parent];
+            if (s.layers[t].items.len >= s.opts.width) {
+                // The layer is full; only a play that ends the game (by
+                // going out) still counts.
+                if (c.passes != 0 or parent.g.bag != 0 or c.move.placed != parent.g.rack[parent.g.turn]) continue;
+            }
             var g = parent.g;
             var h = parent.hist;
             for (0..c.passes) |_| {
@@ -406,9 +444,13 @@ const Search = struct {
                 s.finished(&g, try s.addHist(h, .{ .play = c.move }));
                 continue;
             }
+            if (s.layers[t].items.len >= s.opts.width) continue;
             if (s.opts.per_signature != 0 and s.opts.plans.len != 0) {
                 var sig: u64 = c.dropped;
-                for (s.opts.plans, 0..) |*p, i| sig = sig *% 0x9E3779B97F4A7C15 +% (@as(u64, p.filled(&g.pos)) << 1 | @intFromBool(p.done(&g.pos))) +% i;
+                for (s.opts.plans, 0..) |*p, i| {
+                    sig = sig *% 0x9E3779B97F4A7C15 +% (@as(u64, p.filled(&g.pos)) << 1 | @intFromBool(p.done(&g.pos))) +% i;
+                    sig = sig *% 0x9E3779B97F4A7C15 +% p.tailMask(&g.pos);
+                }
                 const sg = try sigs.getOrPut(s.gpa, sig);
                 if (!sg.found_existing) sg.value_ptr.* = 0;
                 if (sg.value_ptr.* >= s.opts.per_signature) continue;
