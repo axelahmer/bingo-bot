@@ -498,6 +498,8 @@ pub const Active = struct {
     /// square would reduce it.
     approach_now: i32 = 0,
     approach_gain: [NN]i32 = @splat(0),
+    /// The largest of `approach_gain`, a bound for early rejection.
+    max_approach: i32 = 0,
     has_approach: bool = false,
     /// Tiles held back for finishes.
     reserve: [27]u8 = @splat(0),
@@ -922,6 +924,7 @@ fn computeApproach(a: *Active, plans: []const Plan, pos: *const board.Position, 
         var g: i32 = 0;
         for (targets[0..nt], excess[0..nt]) |s, e| g += @max(0, e - (manhattan(q, s) - 1));
         a.approach_gain[q] = w * g;
+        a.max_approach = @max(a.max_approach, w * g);
     }
 }
 

@@ -42,6 +42,40 @@ written as lower-case letters) or `pass`. Players alternate. Rule options:
 `--players 1|2` (default 2), `--blanks N` (default 2), `--end wespa|naspa`
 (default wespa). `solver.py`'s rules are `--players 1 --blanks 0`.
 
+### Running on many cores
+
+A beam search splits each layer's positions across `--threads` threads
+(default: all cores). Between layers it sorts and merges serially, and the
+first layer is one position, so on 4 cores one beam runs 3.6 times faster
+than on one (about 4% of the work is serial). By Amdahl's law that is about
+8 times on 12 cores.
+
+Record attempts are many independent searches (plan sets times seeds), so
+it is better to run several at once. `--jobs J` runs J searches at a time
+and splits the threads between them; with one thread per search there are
+no barriers at all. On 4 cores, four seeds took 55 s as four 1-thread jobs
+and 60 s one after another with 4 threads each, and the gap grows with the
+core count. Each search adds only a few MB (a width-256 run peaks at 72 MB,
+most of it the lexicon and word sets, which the jobs share). Results depend
+only on the plans, seed and search options, never on `--jobs` or
+`--threads`.
+
+On a 12-core machine:
+
+    # many seeds of one plan set: one thread per search
+    zig-out/bin/bingo beam --players 1 --width 128 --hooks strict --letter-cost 27 \
+        --plan row0:OXYPHENBUTAZONE:0,1,3,4,7,11,14 --plan row14:SESQUISULPHIDES:0,3,4,7,9,11,14 \
+        --seed 1 --seeds 48 --jobs 12 --out best.txt
+    # many plan pairs, a few seeds each
+    zig-out/bin/bingo search --players 1 --width 128 --hooks strict --letter-cost 27 \
+        --top 48 --seeds 4 --jobs 12 --out best.txt
+    # one very wide beam: all threads in one search
+    zig-out/bin/bingo beam --players 1 --width 2048 --hooks strict --letter-cost 27 --plan ... --plan ...
+
+The beam is chaotic, so many seeds at a moderate width are a better use of
+cores than one very wide beam: width 512 did worse than 256 on the best
+pair.
+
 ## Rules
 
 - Standard board, letter values and 100-tile set (two blanks), SOWPODS.
@@ -211,6 +245,14 @@ natural L, so SESQUISULPHIDES needed a blank; with the cost, YODELLER took
 the blank and SESQUISULPHIDES scored 1,187 instead of 1,166. Across seeds
 the cost is not uniformly better (3,601 to 3,693 at width 128), but it
 gave both best games.
+
+These ranking terms run for every generated play, billions per search, so
+the visitor that keeps each position's best plays computes them in order of
+cost. Score, setup bonus and hook change come first. Then, if even the
+largest possible distance gain could not lift the play past the worst one
+kept for its size, the play is dropped before the loops over its tiles.
+That halved the time per play with the letter cost on (27.5 s to 13.9 s for
+a width-64 search) and keeps exactly the same plays.
 
 | game | total | OXYPHENBUTAZONE | SESQUISULPHIDES | other plays |
 |---|---:|---:|---:|---:|

@@ -93,17 +93,22 @@ pub const TopBySize = struct {
 
     pub fn visit(self: *TopBySize, c: *const movegen.Candidate) void {
         self.seen += 1;
+        const s = c.placed;
         var key = c.score;
         if (self.act) |a| {
-            if (self.guard and !a.affordable(c.dir, c.line, c.new_mask, c.tiles, c.blanks)) return;
-            key += a.goalValue(c.dir, c.line, c.new_mask) + a.approachValue(c.dir, c.line, c.new_mask);
-            if (self.letter_cost != 0) key -= a.letterCost(self.letter_cost, c.dir, c.line, c.new_mask, c.tiles, c.blanks);
+            key += a.goalValue(c.dir, c.line, c.new_mask);
             if (a.n_hooks != 0 or a.n_mid != 0) {
                 const d = a.hookDelta(self.pos.?, c) orelse return;
                 key += d.value - self.pending_penalty * d.pending;
             }
+            // What is left can add at most `max_approach` (the letter cost
+            // only subtracts), so most plays stop here, before the loops
+            // over their tiles.
+            if (self.n[s] == self.k and key + a.max_approach <= self.worst[s]) return;
+            if (self.guard and !a.affordable(c.dir, c.line, c.new_mask, c.tiles, c.blanks)) return;
+            key += a.approachValue(c.dir, c.line, c.new_mask);
+            if (self.letter_cost != 0) key -= a.letterCost(self.letter_cost, c.dir, c.line, c.new_mask, c.tiles, c.blanks);
         }
-        const s = c.placed;
         if (self.n[s] < self.k) {
             self.moves[s][self.n[s]] = c.toMove();
             self.keys[s][self.n[s]] = key;
@@ -470,10 +475,12 @@ pub fn search(
         if (t >= first + N) s.layers[t - N].clearAndFree(gpa);
         if (progress) |w| {
             if (s.layers[t].items.len > 0) {
-                const top = s.layers[t].items[0].g.total();
+                // Scores as unsigned: a signed width-padded integer prints with a '+'.
+                const top: u32 = @intCast(@max(0, s.layers[t].items[0].g.total()));
+                const fin: u32 = @intCast(@max(0, if (s.best) |b| b.total() else 0));
                 const secs = secondsSince(io, t0);
                 try w.print("tiles {d:>3}: {d:>4} positions, best {d:>5}; finished best {d:>5}; {d:.1} s\n", .{
-                    t, s.layers[t].items.len, top, if (s.best) |b| b.total() else 0, secs,
+                    t, s.layers[t].items.len, top, fin, secs,
                 });
                 try w.flush();
             }
