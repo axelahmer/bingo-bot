@@ -11,6 +11,7 @@ const game = @import("game.zig");
 const search = @import("search.zig");
 const beam = @import("beam.zig");
 const planmod = @import("plan.zig");
+const affix = @import("affix.zig");
 
 const Lexicon = lexicon.Lexicon;
 const N = rules.N;
@@ -24,8 +25,9 @@ const usage =
     \\
     \\commands:
     \\  beam      beam search for a high-scoring game (layers by tiles placed)
-    \\  plans     list plans for a 15-letter play across an edge lane, best first
-    \\  search    pick pairs of lane plans (rows 0 and 14) and beam-search each
+    \\  plans     list plans for a 15-letter play across a lane, best first
+    \\  search    pick pairs of lane plans (rows 0 and 14), optionally with a
+    \\            third on row 7, and beam-search each
     \\  rollout   play games with the 2023 annealed-softmax policy
     \\  check     replay a game under the full rules with real racks and draws
     \\  show      print the position after a game's turns
@@ -52,9 +54,24 @@ const usage =
     \\  --blank-keep V  beam: ranking bonus per unplayed blank (default 0)
     \\  --plan P        beam: set up the play P, e.g. row0:OXYPHENBUTAZONE:0,1,2,4,7,11,14
     \\                  (lane:word:finish squares); up to 4
-    \\  --goal-bonus V  beam: ranking bonus per filled setup square (default 200)
+    \\  --goal-bonus V  beam: ranking bonus per filled setup square (default 200;
+    \\                  a third of it for row 7 and column 7)
+    \\  --hooks H       beam: off (default) keeps the squares beside finish squares
+    \\                  empty; strict lets hooks grow while they stay words; prefix
+    \\                  while they stay word prefixes (suffixes on rows/columns 14)
+    \\  --pending-penalty V  beam: ranking penalty per hook not yet a word (default 30)
+    \\  --approach V   beam: ranking penalty per square between an unfilled setup
+    \\                  square and the nearest tile, beyond adjacent (default 0)
+    \\  --per-signature K  beam: at most K positions per layer with the same setup
+    \\                  progress (default 0: no limit)
+    \\  --letter-cost V  beam: ranking cost per letter point for tiles a play takes
+    \\                  from the plans' setup letters (default 0; 27 prices a blank
+    \\                  in a x27 word)
     \\  --seeds K       search: beam tie-break seeds to try per pair (default 1)
-    \\  --lane L        plans: row0, row14, col0 or col14 (default row0)
+    \\  --mid K         search: also plan a x9 play across row 7, trying the K best
+    \\                  row-7 words that fit with each pair (default 0)
+    \\  --plan-blanks K search: blanks the planned words may use together (default 0)
+    \\  --lane L        plans: row0, row14, col0, col14, row7 or col7 (default row0)
     \\  --max-run K     plans: longest run of setup letters allowed (default 3)
     \\  --top N         plans: how many to list (default 20); search: pairs to try (default 8)
     \\  --games N       games for rollout and verify
@@ -82,6 +99,13 @@ const Options = struct {
     plan_texts: [4][]const u8 = undefined,
     n_plans: usize = 0,
     goal_bonus: i32 = 200,
+    hooks: planmod.HookMode = .off,
+    pending_penalty: i32 = 30,
+    approach: i32 = 0,
+    per_signature: usize = 0,
+    letter_cost: i32 = 0,
+    mid: usize = 0,
+    plan_blanks: u32 = 0,
     seeds: u64 = 1,
     lane: planmod.Lane = .row0,
     max_run: usize = 3,
@@ -138,6 +162,20 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             o.n_plans += 1;
         } else if (std.mem.eql(u8, a, "--goal-bonus")) {
             o.goal_bonus = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--hooks")) {
+            o.hooks = std.meta.stringToEnum(planmod.HookMode, v) orelse return error.Usage;
+        } else if (std.mem.eql(u8, a, "--pending-penalty")) {
+            o.pending_penalty = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--approach")) {
+            o.approach = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--per-signature")) {
+            o.per_signature = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--letter-cost")) {
+            o.letter_cost = try std.fmt.parseInt(i32, v, 10);
+        } else if (std.mem.eql(u8, a, "--mid")) {
+            o.mid = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--plan-blanks")) {
+            o.plan_blanks = try std.fmt.parseInt(u32, v, 10);
         } else if (std.mem.eql(u8, a, "--seeds")) {
             o.seeds = try std.fmt.parseInt(u64, v, 10);
         } else if (std.mem.eql(u8, a, "--lane")) {
@@ -676,8 +714,10 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     for (plans[0..opts.n_plans]) |*p| {
         try out.writeAll("plan ");
         try planmod.write(p, out);
-        try out.print(" (about {d} points on an empty lane)\n", .{p.estimate(opts.rules)});
+        try out.print(" (x{d}, about {d} points on an empty lane)\n", .{ p.multiplier(), p.estimate(opts.rules) });
     }
+    var aff = try loadAffixes(gpa, io, opts, opts.n_plans > 0);
+    defer if (aff) |*a| a.deinit(gpa);
     var res = try beam.search(gpa, lex, &start, .{
         .width = opts.width,
         .per_size = opts.per_size,
@@ -686,6 +726,12 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
         .blank_use = opts.blank_use,
         .plans = plans[0..opts.n_plans],
         .goal_bonus = opts.goal_bonus,
+        .hooks = opts.hooks,
+        .affixes = if (aff) |*a| a else null,
+        .pending_penalty = opts.pending_penalty,
+        .approach = opts.approach,
+        .per_signature = opts.per_signature,
+        .letter_cost = opts.letter_cost,
         .seed = opts.seed,
     }, out, io);
     defer res.deinit(gpa);
@@ -693,8 +739,10 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
         try out.writeAll("no finished game\n");
         return;
     };
-    try out.print("best {d} in {d} turns; {d} positions expanded, {d:.0} M plays generated, {d:.1} s\n", .{
-        best.total(), res.turns.len, res.expanded, @as(f64, @floatFromInt(res.plays_seen)) / 1e6, res.seconds,
+    var finished: usize = 0;
+    for (plans[0..opts.n_plans]) |*p| finished += @intFromBool(p.completed(&best.pos));
+    try out.print("best {d} in {d} turns ({d}/{d} finishes, best play {d}); {d} positions expanded, {d:.0} M plays generated, {d:.1} s\n", .{
+        best.total(), res.turns.len, finished, opts.n_plans, bestPlay(res.turns), res.expanded, @as(f64, @floatFromInt(res.plays_seen)) / 1e6, res.seconds,
     });
     try writeTurns(out, lex, &start, res.turns, true);
     try best.pos.writeBoard(out);
@@ -705,13 +753,40 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
         var buf: [4096]u8 = undefined;
         var fw = file.writer(io, &buf);
         const r = opts.rules;
-        try fw.interface.print("# beam width {d}, {d} per size, blank keep {d}: {d} points ({d} players, {d} blanks, {s})\n", .{
-            opts.width, opts.per_size, opts.blank_keep, best.total(), r.players, r.blanks, @tagName(r.end_rule),
+        try fw.interface.print("# beam width {d}, {d} per size, blank keep {d}, hooks {s}, seed {d}", .{
+            opts.width, opts.per_size, opts.blank_keep, @tagName(opts.hooks), opts.seed,
         });
+        if (opts.per_signature != 0) try fw.interface.print(", per signature {d}", .{opts.per_signature});
+        if (opts.approach != 0) try fw.interface.print(", approach {d}", .{opts.approach});
+        if (opts.letter_cost != 0) try fw.interface.print(", letter cost {d}", .{opts.letter_cost});
+        for (plans[0..opts.n_plans]) |*pl| {
+            try fw.interface.writeAll(", plan ");
+            try planmod.write(pl, &fw.interface);
+        }
+        try fw.interface.print(": {d} points ({d} players, {d} blanks, {s})\n", .{ best.total(), r.players, r.blanks, @tagName(r.end_rule) });
         try writeTurns(&fw.interface, lex, &Game.init(r), prefix.items, false);
         try writeTurns(&fw.interface, lex, &start, res.turns, false);
         try fw.interface.flush();
     }
+}
+
+/// The word, prefix and suffix sets that plans use to grow hooks and to
+/// keep setup squares fillable.
+fn loadAffixes(gpa: Allocator, io: Io, opts: Options, with_plans: bool) !?affix.Affixes {
+    if (!with_plans and opts.hooks == .off) return null;
+    const text = try Io.Dir.cwd().readFileAlloc(io, opts.words, gpa, .unlimited);
+    defer gpa.free(text);
+    return try affix.Affixes.build(gpa, text);
+}
+
+/// Highest score of a single play in a game.
+fn bestPlay(turns: []const Turn) i32 {
+    var best: i32 = 0;
+    for (turns) |t| switch (t) {
+        .play => |m| best = @max(best, m.score),
+        .pass => {},
+    };
+    return best;
 }
 
 fn cmdPlans(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
@@ -733,9 +808,10 @@ fn cmdPlans(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io
     }
 }
 
-/// Two big plays: a 15-letter word across row 0 and another across row 14.
-/// Candidate words are those with the best estimated finishes; pairs must fit
-/// the tile set together. The most promising pairs are each beam-searched.
+/// Two big plays: a 15-letter word across row 0 and another across row 14,
+/// optionally with a third across row 7 (x9). Candidate words are those with
+/// the best estimated finishes; plan sets must fit the tile set together.
+/// The most promising sets are each beam-searched.
 fn cmdSearch(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
     const r = opts.rules;
     const text = try Io.Dir.cwd().readFileAlloc(io, opts.words, gpa, .unlimited);
@@ -787,24 +863,31 @@ fn cmdSearch(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *I
     defer pairs.deinit(gpa);
     for (picks.items, 0..) |*a, i| {
         for (picks.items[i + 1 ..]) |*b| {
-            if (std.mem.eql(u5, &a.word, &b.word) or !planmod.fitNaturally(a, b)) continue;
+            if (std.mem.eql(u5, &a.word, &b.word)) continue;
             var pr = [2]planmod.Plan{ a.*, b.* };
+            if (!planmod.fitTogether(&pr, opts.plan_blanks)) continue;
             pr[1] = planmod.make(.row14, &lettersText(&b.word), b.finish, r) catch continue;
             planmod.reserveJointly(&pr, r) catch continue;
             try pairs.append(gpa, .{ .plans = pr, .estimate = pr[0].estimate(r) + pr[1].estimate(r) });
         }
     }
     std.sort.pdq(Pair, pairs.items, {}, Pair.better);
-    // One pair per word combination: different finish sets of the same two
-    // words are close variants.
-    try out.print("{d} candidate pairs; trying the best {d} word pairs\n", .{ pairs.items.len, opts.top });
+    const mids: []planmod.Scored = if (opts.mid > 0) try planmod.enumerate(gpa, lex, text, .row7, opts.max_run, r) else &.{};
+    defer if (opts.mid > 0) gpa.free(mids);
+    try out.print("{d} candidate pairs; trying the best {d} word pairs", .{ pairs.items.len, opts.top });
+    if (opts.mid > 0) try out.print(", each with up to {d} row-7 plans ({d} listed)", .{ opts.mid, mids.len });
+    try out.print("; hooks {s}\n", .{@tagName(opts.hooks)});
 
+    var aff = try loadAffixes(gpa, io, opts, true);
+    defer if (aff) |*a| a.deinit(gpa);
     const start = Game.init(r);
     const nthreads = @max(1, if (opts.threads != 0) opts.threads else std.Thread.getCpuCount() catch 1);
+    const max_sets = 8;
     var best_total: i32 = std.math.minInt(i32);
     var best_turns: []game.Turn = &.{};
     defer gpa.free(best_turns);
-    var best_pair: ?Pair = null;
+    var best_set: [3]planmod.Plan = undefined;
+    var best_len: usize = 0;
     var best_seed: u64 = 0;
     var tried: usize = 0;
     var tried_words: std.ArrayList([2][N]u5) = .empty;
@@ -822,53 +905,88 @@ fn cmdSearch(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *I
         if (uses[0] >= 3 or uses[1] >= 3) continue;
         try tried_words.append(gpa, .{ pr.plans[0].word, pr.plans[1].word });
         tried += 1;
-        for (opts.seed..opts.seed + opts.seeds) |seed| {
-            var res = try beam.search(gpa, lex, &start, .{
-                .width = opts.width,
-                .per_size = opts.per_size,
-                .blank_keep = opts.blank_keep,
-                .threads = nthreads,
-                .blank_use = opts.blank_use,
-                .plans = &pr.plans,
-                .goal_bonus = opts.goal_bonus,
-                .seed = seed,
-            }, null, io);
-            const total: i32 = if (res.best) |g| g.total() else 0;
-            var finished: usize = 0;
-            if (res.best) |g| {
-                for (&pr.plans) |*p| finished += @intFromBool(p.done(&g.pos));
+
+        // The pair alone, or with each of the best row-7 words that fit.
+        var sets: [max_sets][3]planmod.Plan = undefined;
+        var n_sets: usize = 0;
+        const set_len: usize = if (opts.mid > 0) 3 else 2;
+        if (opts.mid == 0) {
+            sets[0] = .{ pr.plans[0], pr.plans[1], undefined };
+            n_sets = 1;
+        } else {
+            for (mids) |*m| {
+                if (n_sets == @min(opts.mid, max_sets)) break;
+                var dup = false;
+                for (sets[0..n_sets]) |*s| dup = dup or std.mem.eql(u5, &s[2].word, &m.plan.word);
+                if (dup) continue;
+                var tri = [3]planmod.Plan{ pr.plans[0], pr.plans[1], m.plan };
+                if (!planmod.fitTogether(&tri, opts.plan_blanks)) continue;
+                planmod.reserveJointly(&tri, r) catch continue;
+                sets[n_sets] = tri;
+                n_sets += 1;
             }
-            try out.print("{d:>5}  ({d}/2 finishes, seed {d}, estimate {d:>4}, {d:.1} s)  ", .{
-                @as(u32, @intCast(@max(total, 0))), finished, seed, @as(u32, @intCast(pr.estimate)), res.seconds,
-            });
-            try planmod.write(&pr.plans[0], out);
-            try out.writeAll("  ");
-            try planmod.write(&pr.plans[1], out);
-            try out.writeByte('\n');
-            try out.flush();
-            if (total > best_total) {
-                best_total = total;
-                gpa.free(best_turns);
-                best_turns = res.turns;
-                res.turns = &.{};
-                best_pair = pr.*;
-                best_seed = seed;
+        }
+        for (sets[0..n_sets]) |*set| {
+            const plans = set[0..set_len];
+            var estimate: i32 = 0;
+            for (plans) |*p| estimate += p.estimate(r);
+            for (opts.seed..opts.seed + opts.seeds) |seed| {
+                var res = try beam.search(gpa, lex, &start, .{
+                    .width = opts.width,
+                    .per_size = opts.per_size,
+                    .blank_keep = opts.blank_keep,
+                    .threads = nthreads,
+                    .blank_use = opts.blank_use,
+                    .plans = plans,
+                    .goal_bonus = opts.goal_bonus,
+                    .hooks = opts.hooks,
+                    .affixes = if (aff) |*a| a else null,
+                    .pending_penalty = opts.pending_penalty,
+                    .approach = opts.approach,
+                    .per_signature = opts.per_signature,
+                    .letter_cost = opts.letter_cost,
+                    .seed = seed,
+                }, null, io);
+                const total: i32 = if (res.best) |g| g.total() else 0;
+                var finished: usize = 0;
+                if (res.best) |g| {
+                    for (plans) |*p| finished += @intFromBool(p.completed(&g.pos));
+                }
+                try out.print("{d:>5}  ({d}/{d} finishes, best play {d:>4}, seed {d}, estimate {d:>4}, {d:.1} s) ", .{
+                    @as(u32, @intCast(@max(total, 0))), finished, set_len, @as(u32, @intCast(bestPlay(res.turns))), seed, @as(u32, @intCast(estimate)), res.seconds,
+                });
+                for (plans) |*p| {
+                    try out.writeByte(' ');
+                    try planmod.write(p, out);
+                }
+                try out.writeByte('\n');
+                try out.flush();
+                if (total > best_total) {
+                    best_total = total;
+                    gpa.free(best_turns);
+                    best_turns = res.turns;
+                    res.turns = &.{};
+                    best_set = set.*;
+                    best_len = set_len;
+                    best_seed = seed;
+                }
+                res.deinit(gpa);
             }
-            res.deinit(gpa);
         }
     }
-    if (best_pair == null) return;
-    try out.print("\nbest {d}:\n", .{best_total});
+    if (best_len == 0) return;
+    try out.print("\nbest {d} (best play {d}):\n", .{ best_total, bestPlay(best_turns) });
     try writeTurns(out, lex, &start, best_turns, true);
     if (opts.out) |p| {
         var file = try Io.Dir.cwd().createFile(io, p, .{});
         defer file.close(io);
         var buf: [4096]u8 = undefined;
         var fw = file.writer(io, &buf);
-        try fw.interface.print("# search: beam width {d}, goal bonus {d}, seed {d}, plans ", .{ opts.width, opts.goal_bonus, best_seed });
-        try planmod.write(&best_pair.?.plans[0], &fw.interface);
-        try fw.interface.writeAll(" and ");
-        try planmod.write(&best_pair.?.plans[1], &fw.interface);
+        try fw.interface.print("# search: beam width {d}, goal bonus {d}, hooks {s}, seed {d}, plans", .{ opts.width, opts.goal_bonus, @tagName(opts.hooks), best_seed });
+        for (best_set[0..best_len]) |*pl| {
+            try fw.interface.writeByte(' ');
+            try planmod.write(pl, &fw.interface);
+        }
         try fw.interface.print(": {d} points ({d} players, {d} blanks, {s})\n", .{ best_total, r.players, r.blanks, @tagName(r.end_rule) });
         try writeTurns(&fw.interface, lex, &start, best_turns, false);
         try fw.interface.flush();
@@ -1018,5 +1136,6 @@ test {
     _ = search;
     _ = beam;
     _ = planmod;
+    _ = affix;
     _ = @import("tests.zig");
 }

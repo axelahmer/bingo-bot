@@ -9,8 +9,9 @@ Beaman's cooperative game of 4,142 points (1974), Jeff Grant's 4,207 with
 99 tiles (1979), and Grant's solitaire game of 4,454 using all 100 tiles
 (1981), later raised to 4,470.
 
-Best found so far (SOWPODS, full rules, two blanks): 3,336 in solitaire and
-3,251 for two cooperating players, both in `results/` (see Search).
+Best found so far (SOWPODS, full rules, two blanks): 3,693 in solitaire and
+3,635 for two cooperating players, both in `results/` (see Search). The
+best single play found is OXYPHENBUTAZONE for 1,619.
 
 `solver.py` is the 2023 Python experiment. It is kept unchanged as the
 reference implementation and the performance baseline. `src/` is the Zig
@@ -26,7 +27,7 @@ Needs Zig 0.17.1 (`pip install ziglang==0.17.1` also provides it).
 The first command that needs the lexicon builds `sowpods.gaddag` from
 `sowpods.txt` (about 1.6 s) and reuses it afterwards.
 
-    zig-out/bin/bingo search --players 1 --seeds 2 --top 16 --out best.txt   # lane plans + beam
+    zig-out/bin/bingo search --players 1 --hooks strict --per-signature 8 --seeds 2 --top 16 --out best.txt
     zig-out/bin/bingo beam --width 64 --out best.txt                 # beam search, no plans
     zig-out/bin/bingo plans --lane row0 --top 20                     # candidate 15-letter plays
     zig-out/bin/bingo rollout --games 1000 --seed 1 --out best.txt   # 2023 policy, all cores
@@ -67,6 +68,25 @@ replays the game against them, and prints the full record. One consequence,
 which matches the *Word Ways* history: a two-player game can never use all
 100 tiles, because when one player goes out the other still holds at least
 one.
+
+With chosen draws and a shared goal, the two-player game is still a search
+for one decision maker, who plays both sides and picks every draw. It
+differs from solitaire only in these ways:
+
+- The partner always holds up to 7 tiles, so the bag empties 7 tiles
+  sooner and racks shrink earlier at the end. With racks described by size,
+  the partner's rack never stops the mover from using any unplayed letter.
+- The game ends when either player goes out, leaving at least one tile
+  unplayed (99 at most).
+- The end adjustment cancels out of the combined score under WESPA rules
+  (the player going out gains exactly what the partner loses). Under NASPA
+  rules it adds twice the value of the partner's last tiles.
+
+Every two-player game, replayed by one player, is also a legal solitaire
+game with one or more tiles still to play. So solitaire is the slightly
+easier problem: under WESPA rules its best score is at least the
+cooperative best, less the value of any leftover tiles the solitaire
+player then cannot play.
 
 ## Search
 
@@ -117,9 +137,14 @@ Results under the full rules (two blanks):
 | best of 400 rollouts (2023 policy) | 1,820 | 1,814 | 23 s |
 | beam, width 256, no plans | 1,826 | | 48 s |
 | plan search: 16 pairs, 2 seeds each, width 64 | 3,336 | 3,251 | about 7 min |
+| best pair, hooks and letter cost (below) | 3,693 | 3,635 | 47 s, 86 s |
 
-    zig-out/bin/bingo search --players 1 --width 64 --seeds 2 --top 16 --out best.txt
-    zig-out/bin/bingo search --width 64 --seeds 2 --top 16 --out best.txt
+The first three rows come from the code as it was before the changes
+below; the last row is reproduced by
+
+    P="--plan row0:OXYPHENBUTAZONE:0,1,3,4,7,11,14 --plan row14:SESQUISULPHIDES:0,3,4,7,9,11,14"
+    zig-out/bin/bingo beam --players 1 --width 128 --seed 2 --hooks strict --letter-cost 27 $P --out best.txt
+    zig-out/bin/bingo beam --players 2 --width 256 --seed 2 --hooks strict --letter-cost 27 $P --out best.txt
 
 The two best games are in `results/` and replay under `bingo check`. The
 solitaire game uses all 100 tiles; MATHEMATICIZING (1,346) and
@@ -127,23 +152,138 @@ XYLOTYPOGRAPHIC (1,157) across rows 0 and 14 are 75% of its score, and the
 search learned to play both finishes last. The two-player game plays 99
 tiles (a two-player game cannot play all 100).
 
-The *Word Ways* records are 4,207 (cooperative, 99 tiles) and 4,454 to
-4,470 (solitaire), built by hand with a different dictionary:
-BENZOXYCAMPHORS, central to several of them, is not in SOWPODS.
+### Hooks, guards and diversity
+
+Three changes made the plans pay off.
+
+- **Hooks** (`--hooks strict`). The squares beside a finish square are no
+  longer kept empty. Each finishing tile's cross word grows into the board
+  while it stays a word. The empty square at the open end of the run beside
+  a finish square accepts only letters that keep "finish letter + run" a
+  word (on a top or left lane; "run + finish letter" on a bottom or right
+  lane), and plays along the run are checked the same way. The hook points
+  a position already has count in its ranking, so the beam builds the hooks
+  it can see. `--hooks prefix` also allows prefixes that are not yet words,
+  with a ranking penalty for each; it gave the same results.
+- **Guards.** Unfilled setup squares get the same rule, scoring nothing, so
+  that their letter can always still be placed. Before guards, a blank Q
+  above a setup O ended a plan, because no word ends in QO. A setup square
+  on the middle row has runs on both sides, so its guard asks only for a
+  substring of some word. The GADDAG answers that directly: a path from the
+  root spelling the string backwards exists only for substrings of words. A
+  plan is also dropped as soon as one of its setup letters fits neither the
+  across nor the down cross-check.
+- **Diversity** (`--per-signature K`). A layer's best positions tend to
+  share one line of setup, and when it fails they all fail. This keeps at
+  most K positions per layer with the same filled setup squares.
+
+A bug fix came first. On the empty board the generator walks only across
+plays and reports each one again as its mirror image down. That assumes
+the constraints are symmetric, and plan restrictions are not, so it emitted
+first plays that broke them. With restrictions both directions are now
+walked. That alone turned the 3,336 game's settings into a 2,340 game: the
+beam is chaotic, so settings have to be compared over many seeds.
+
+Solitaire, width 64, 8 seeds per setting. "Both" counts the games where
+both planned x27 plays were made:
+
+| plans | setting | both | best game | best play |
+|---|---|---:|---:|---:|
+| MATHEMATICIZING + XYLOTYPOGRAPHIC | hooks off | 0 | 3,069 | 1,157 |
+| | strict hooks | 1 | 3,422 | 1,439 |
+| | strict, `--approach 10` | 2 | 3,422 | 1,430 |
+| | strict, `--per-signature 8` | 6 | 3,414 | 1,442 |
+| OXYPHENBUTAZONE + SESQUISULPHIDES | strict hooks | 8 | 3,624 | 1,610 |
+| | strict, `--per-signature 8` | 8 | 3,641 | 1,589 |
+
+OXYPHENBUTAZONE + SESQUISULPHIDES has the best estimate of any pair whose
+words fit the natural tiles together (1,508 + 1,157), and with hooks the
+search lands both plays from every seed tried. `bingo search` over the 24
+best pairs (strict hooks, `--per-signature 8`, 2 seeds each) found nothing
+better: the next best pairs reached 3,531.
+
+The best two games came from one more change, `--letter-cost 27`. When a
+play spends more of a letter than the plans' setups can spare, it is
+charged that letter's value times 27, the points a blank on the setup
+square would cost the x27 word. (Refusing such plays outright, with
+`Options.guard`, made results worse.) In the 3,668 game YODELLER had taken the last
+natural L, so SESQUISULPHIDES needed a blank; with the cost, YODELLER took
+the blank and SESQUISULPHIDES scored 1,187 instead of 1,166. Across seeds
+the cost is not uniformly better (3,601 to 3,693 at width 128), but it
+gave both best games.
+
+| game | total | OXYPHENBUTAZONE | SESQUISULPHIDES | other plays |
+|---|---:|---:|---:|---:|
+| `results/solitaire-3693.txt` | 3,693 | 1,580 | 1,187 | 926 (27 plays) |
+| `results/two-player-3635.txt` | 3,635 (2,094 + 1,541) | 1,589 | 1,187 | 859 (24 plays) |
+
+Both replay under `bingo check`. In the solitaire game the first play,
+OWLLIKE down from (1,7), later became the hook BOWLLIKE (51 points through
+the triple-word square at (0,7)). `results/two-player-play-1619.txt` (a
+3,594 game) holds the best single play found: OXYPHENBUTAZONE for 1,619,
+with hooks XI, BOWLLIKE, ZO and ESTRANGE.
+
+The middle row is implemented too (`row7` and `col7` lanes, and `--mid K`
+in `bingo search` adds a x9 plan across row 7) but does not work yet. Until
+its finish is played, a row-7 plan is a wall across the middle of the
+board, crossable only at its 8 setup squares, each fixed to one letter.
+Runs with one explored a tenth as many plays and never finished it.
+
+### Published records
+
+Whole games. All were built by hand with chosen draws, except Sudbery's,
+which was played out with random draws.
+
+| score | tiles | players | word list | source |
+|---:|---:|---|---|---|
+| 3,108 | | 2, cooperative | | Darryl Francis, *Word Ways* 1972 |
+| 4,047 | | 2, cooperative | general dictionaries, BENZOXYCAMPHORS | Ron Jerome, *Word Ways* 1974 |
+| 4,142 | | 2, cooperative | general dictionaries, BENZOXYCAMPHORS | Ralph Beaman, *Word Ways* 1974 |
+| 4,207 | 99 | 2, cooperative | general dictionaries, BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1979 |
+| 4,454 | 100 | solitaire | general dictionaries, BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1981 |
+| 4,470 | 100 | solitaire | as above, adjusted | Jeff Grant, *Word Ways* 2009 |
+| 3,986 | 99 | 2, cooperative | OSPD and Webster's Tenth Collegiate | Stephen Root and Nathan Hedt, *Word Ways* 2003 |
+| 3,674 | | 2 (3,658 by one) | North American and British lists | Clare Sudbery, 2004 (PixiePit) |
+
+Single plays:
+
+| score | word list | method | source |
+|---:|---|---|---|
+| 2,037 | general dictionaries (SESQUIOXIDIZING) | by hand | Josefa Heifetz, *Word Ways* 1974 |
+| 1,778 | OWL and the Long Words List | by hand | Dan Stock, in the rec.games.board.scrabble FAQ |
+| 1,784 | NASPA list | by hand | "Jodi and Eric", NASPA wiki |
+| 1,786 | NWL23 | SAT solver, proved best for NWL23 | Bob Lucassen, Woogles blog 2024 |
+
+The record plays are all OXYPHENBUTAZONE across an edge with seven hooks.
+Dan Stock's: (54 x 27 = 1,458) + 50 + OPACIFYING 63 + BRAINWASHING 63 +
+EJACULATING 63 + ZARFS 27 + PREINTERVIEWED 25 + AMELIORATIVE 17 + YELKS 12.
+Every word of that play is in our SOWPODS list. Lucassen's 1,786 needs
+OPACIFICATIONS, which is not.
+
+So the published targets for SOWPODS are a 3,674-point game, played with
+random draws, and a single play of about 1,780. Nothing published seems to
+search for the whole-game maximum by computer: the game records are hand
+constructions, the SAT solver addressed one play, and a 2024 Wolfram
+Community post searched randomly for all-bingo games.
+
+Against those targets: the 3,693 solitaire game passes the 3,674 game, but
+that was a two-player game, and our best two-player game (3,635) is 39
+points short of it. Our best single play (1,619) is about 160 points short
+of the record plays; the gap is almost all hooks.
 
 What limits the search now:
 
-- Completing a setup is fragile. Whether both finishes land depends on the
-  seed, the width and the plan, and the plan's estimate predicts the result
-  poorly. A guard that refuses plays leaving a plan short of letters
+- **Hooks.** Hooks are found, not designed: the best plays carry 70 to 110
+  points of them (BOWLLIKE through (0,7) in the best game). The record
+  single plays carry 270 or more, from seven long hooks packed into one
+  dense block, which needs a constraint solver to design.
+- **The middle row.** No x9 play is made. The two free triple-word squares,
+  (7,0) and (7,14), need a row-7 plan that does not split the board.
+- **The rest of the game.** Outside the two big plays, about 920 points come
+  from about 27 plays.
+- **Letters.** A guard that refuses plays leaving a plan short of letters
   (`Options.guard`) made results worse: it also forbids spending a natural
-  letter that a free blank could later replace, which is how several good
-  games filled their hardest square.
-- Outside the two big plays, about 900 points come from about 28 plays. No
-  x9 play is made, although the two remaining triple-word squares, (7,0)
-  and (7,14), allow one across row 7.
-- The finish squares are kept free of cross words, so the finishes earn no
-  hooks (a cross word through a triple-word square is tripled too).
+  letter that a free blank could later replace.
 
 ## Engine
 
@@ -312,12 +452,19 @@ Fixed in the port, still present in `solver.py`:
 
 ## Next steps
 
-- **Finish setups reliably.** Check that each setup square can still be
-  reached, give hard squares (isolated, or rare letters) more weight, and
-  let the beam branch on dropping a plan instead of dropping it only when
-  stuck.
-- **A third big play.** Row 7 between (7,0) and (7,14) gives a x9 play
-  worth 300 to 400 points; hooks under the finish squares add more.
+- **Design the hooks.** The record plays get 270 points or more from seven
+  long hooks packed into one dense block. Finding such a block is a small
+  crossword-construction problem (a SAT or constraint search over the
+  squares beside the lane, as Lucassen did for one play). Its letters can
+  then become setup squares of the plan, which the beam already knows how
+  to fill.
+- **A third big play that does not split the board.** Row 7 between (7,0)
+  and (7,14) gives a x9 play worth 300 to 500 points, but a row-7 plan
+  walls off the two halves until it is played. Plans that open late, after
+  the edge setups are done, may avoid that.
+- **Remote setup squares.** Most failed setups leave a square far from the
+  play (the Y at (0,2), the L and O at (14,2) and (14,3)). A distance
+  potential (`--approach`) helped on one pair and hurt on another.
 - **Better play around the plans.** Nested Monte Carlo Search (Cazenave
   2009) or Nested Rollout Policy Adaptation (Rosin 2011), which set records
   on single-player puzzles such as Morpion Solitaire, run over the beam's

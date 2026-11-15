@@ -136,10 +136,11 @@ fn run(
     const root = lex.root();
     // The board is symmetric about its diagonal, so on the empty board every
     // down play mirrors an across play with the same score: walk across
-    // only and report each play in both directions.
+    // only and report each play in both directions. Square restrictions
+    // need not be symmetric, so with them both directions are walked.
     const first_play = pos.tiles_on_board == 0;
-    g.mirror = first_play;
-    for (0..@as(usize, if (first_play) 1 else 2)) |d| {
+    g.mirror = first_play and sup.restrict == null;
+    for (0..@as(usize, if (g.mirror) 1 else 2)) |d| {
         for (0..N) |line| {
             if (first_play and line != rules.CENTER) continue;
             g.loadLine(pos, @intCast(d), line, first_play);

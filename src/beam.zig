@@ -17,6 +17,7 @@ const board = @import("board.zig");
 const movegen = @import("movegen.zig");
 const game = @import("game.zig");
 const planmod = @import("plan.zig");
+const affix = @import("affix.zig");
 
 const Allocator = std.mem.Allocator;
 const Move = board.Move;
@@ -36,26 +37,47 @@ pub const Options = struct {
     /// Big plays to set up (see plan.zig). Until a plan's finish is played,
     /// its squares are restricted and its finishing tiles held back.
     plans: []const planmod.Plan = &.{},
-    /// Ranking bonus per filled setup square of an unfinished plan.
+    /// Ranking bonus per filled setup square of an unfinished edge plan
+    /// (middle plans get a third).
     goal_bonus: i32 = 100,
+    /// Whether finishes may earn hooks, and how hooks are grown.
+    hooks: planmod.HookMode = .off,
+    /// Word, prefix and suffix sets; required when `hooks` is not `.off`.
+    affixes: ?*const affix.Affixes = null,
+    /// Ranking penalty per hook that is not yet a word (it blocks a finish).
+    pending_penalty: i32 = 30,
+    /// Ranking penalty per square of distance from an unfilled setup square
+    /// to the nearest tile (beyond adjacent).
+    approach: i32 = 0,
     /// Skip plays that would leave a live plan short of letters.
     guard: bool = false,
+    /// Ranking cost per point of letter value for each tile a play takes
+    /// from a live plan's setup letters (0: none). With a x27 plan, 27
+    /// prices the blank the setup would then need.
+    letter_cost: i32 = 0,
+    /// At most this many positions per layer with the same plan progress
+    /// (which setup squares are filled, which plans were given up); 0 for
+    /// no limit. Keeps alternative lines of setup alive.
+    per_signature: usize = 0,
     /// Tie-break order between equally ranked positions; different seeds
     /// give different (each reproducible) searches.
     seed: u64 = 0,
 };
 
-/// Keeps the best `k` plays of each size.
-/// Keeps the best `k` plays of each size, ranked by score plus a bonus for
-/// each plan setup square the play fills.
+/// Keeps the best `k` plays of each size, ranked by score plus what the
+/// play does for the open plans: a bonus for each setup square it fills,
+/// and the change in hook points (less a penalty for each hook it leaves
+/// blocking a finish).
 pub const TopBySize = struct {
     pub const max_k = 32;
     k: usize,
-    /// Per (direction, line): positions that are empty setup squares.
-    goal: ?*const [2][N]u16 = null,
-    bonus: i32 = 0,
-    /// When set, plays that would starve a live plan are skipped.
-    guard: ?*const planmod.Active = null,
+    /// The open plans of the position being expanded, if any.
+    act: ?*const planmod.Active = null,
+    pos: ?*const board.Position = null,
+    /// Skip plays that would starve a live plan.
+    guard: bool = false,
+    letter_cost: i32 = 0,
+    pending_penalty: i32 = 0,
     n: [N + 1]u8 = @splat(0),
     worst: [N + 1]i32 = @splat(std.math.minInt(i32)),
     worst_at: [N + 1]u8 = @splat(0),
@@ -69,18 +91,19 @@ pub const TopBySize = struct {
         self.seen = 0;
     }
 
-    pub fn goals(self: *const TopBySize, dir: u1, line: u8, new_mask: u16) i32 {
-        const gm = self.goal orelse return 0;
-        return self.bonus * @popCount(new_mask & gm[dir][line]);
-    }
-
     pub fn visit(self: *TopBySize, c: *const movegen.Candidate) void {
         self.seen += 1;
-        if (self.guard) |a| {
-            if (!a.affordable(c.dir, c.line, c.new_mask, c.tiles, c.blanks)) return;
+        var key = c.score;
+        if (self.act) |a| {
+            if (self.guard and !a.affordable(c.dir, c.line, c.new_mask, c.tiles, c.blanks)) return;
+            key += a.goalValue(c.dir, c.line, c.new_mask) + a.approachValue(c.dir, c.line, c.new_mask);
+            if (self.letter_cost != 0) key -= a.letterCost(self.letter_cost, c.dir, c.line, c.new_mask, c.tiles, c.blanks);
+            if (a.n_hooks != 0 or a.n_mid != 0) {
+                const d = a.hookDelta(self.pos.?, c) orelse return;
+                key += d.value - self.pending_penalty * d.pending;
+            }
         }
         const s = c.placed;
-        const key = c.score + self.goals(c.dir, c.line, c.new_mask);
         if (self.n[s] < self.k) {
             self.moves[s][self.n[s]] = c.toMove();
             self.keys[s][self.n[s]] = key;
@@ -228,37 +251,46 @@ const Worker = struct {
         var g = e.g;
         var passes: u8 = 0;
         var act: planmod.Active = undefined;
-        var finishes: [4]Move = undefined;
-        var fin_bonus: [4]i32 = undefined;
+        var finishes: [planmod.max_plans]Move = undefined;
+        var fin_plan: [planmod.max_plans]u8 = undefined;
         var n_fin: usize = 0;
-        var bonus_now: i32 = 0;
         var dropped = e.dropped;
+        const ctx = planmod.Context{
+            .hooks = sh.opts.hooks,
+            .affixes = sh.opts.affixes,
+            .goal_bonus = sh.opts.goal_bonus,
+            .approach = sh.opts.approach,
+            .lex = sh.lex,
+        };
         while (true) {
             // Live plans narrow the supply and the squares.
             var sup = g.supply();
             sup.blanks = sh.opts.blank_use;
-            act = planmod.activate(sh.opts.plans, &g.pos, dropped);
+            act = planmod.activate(sh.opts.plans, &g.pos, dropped, ctx);
             for (0..27) |t| sup.counts[t] -|= act.reserve[t];
-            bonus_now = sh.opts.goal_bonus * @as(i32, @intCast(act.filled));
             n_fin = 0;
             for (sh.opts.plans, 0..) |*p, i| {
                 if ((act.live >> @intCast(i)) & 1 == 0) continue;
                 if (p.finishMove(sh.lex, g.rules, &g.pos)) |m| {
-                    if (m.placed <= g.rack[g.turn] and n_fin < finishes.len) {
+                    if (m.placed <= g.rack[g.turn]) {
                         finishes[n_fin] = m;
-                        fin_bonus[n_fin] = sh.opts.goal_bonus * @popCount(p.setup());
+                        fin_plan[n_fin] = @intCast(i);
                         n_fin += 1;
                     }
                 }
             }
             if (act.live != 0) sup.restrict = &act.restrict;
             w.top.reset();
-            w.top.goal = if (act.live != 0) &act.goal else null;
-            w.top.guard = if (sh.opts.guard and act.live != 0) &act else null;
-            w.top.bonus = sh.opts.goal_bonus;
+            w.top.act = if (act.live != 0) &act else null;
+            w.top.pos = &g.pos;
+            w.top.guard = sh.opts.guard;
+            w.top.pending_penalty = sh.opts.pending_penalty;
+            w.top.letter_cost = sh.opts.letter_cost;
             movegen.generate(TopBySize, &w.top, &g.pos, sh.lex, g.rules, sup);
             w.plays_seen += w.top.seen;
-            if (w.top.seen != 0 or n_fin != 0) break;
+            var kept: usize = 0;
+            for (w.top.n) |k| kept += k;
+            if (kept != 0 or n_fin != 0) break;
             // Stuck under the plans: give them up rather than pass.
             if (act.live != 0) {
                 dropped |= act.live;
@@ -273,11 +305,14 @@ const Worker = struct {
         }
         const total: i64 = g.total();
         const blanks_left: i32 = g.pos.pool[rules.BLANK_SLOT];
+        // What the open plans promise: their setup bonus and hook points.
+        const pen = sh.opts.pending_penalty;
+        const promise: i64 = act.bonus_now + act.approach_now + act.hook_value - pen * act.hook_pending;
         for (1..N + 1) |s| {
-            for (w.top.moves[s][0..w.top.n[s]]) |*m| {
+            for (w.top.moves[s][0..w.top.n[s]], w.top.keys[s][0..w.top.n[s]]) |*m, key| {
                 const keep = sh.opts.blank_keep * (blanks_left - blanksIn(m));
                 try w.out.append(w.gpa, .{
-                    .rank = total + m.score + keep + bonus_now + w.top.goals(m.dir, m.line, m.new_mask),
+                    .rank = total + key + keep + promise,
                     .board_hash = e.board_hash ^ moveHash(m),
                     .parent_layer = sh.layer_index,
                     .parent = idx,
@@ -287,11 +322,12 @@ const Worker = struct {
                 });
             }
         }
-        // A finish replaces its plan's setup bonus with its real score.
-        for (finishes[0..n_fin], fin_bonus[0..n_fin]) |*m, setup_bonus| {
+        // A finish turns its plan's promise into its real score.
+        for (finishes[0..n_fin], fin_plan[0..n_fin]) |*m, pi| {
             const keep = sh.opts.blank_keep * (blanks_left - blanksIn(m));
+            const own: i64 = act.bonus[pi] * @as(i32, act.plan_filled[pi]) + act.plan_hook_value[pi] - pen * act.plan_pending[pi];
             try w.out.append(w.gpa, .{
-                .rank = total + m.score + keep + bonus_now - setup_bonus,
+                .rank = total + m.score + keep + promise - own,
                 .board_hash = e.board_hash ^ moveHash(m),
                 .parent_layer = sh.layer_index,
                 .parent = idx,
@@ -343,6 +379,8 @@ const Search = struct {
         std.sort.pdq(Cand, cands, s.opts.seed, Cand.before);
         var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer seen.deinit(s.gpa);
+        var sigs: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer sigs.deinit(s.gpa);
         for (cands) |*c| {
             if (s.layers[t].items.len >= s.opts.width) break;
             const parent = &s.layers[c.parent_layer].items[c.parent];
@@ -354,13 +392,22 @@ const Search = struct {
             }
             g.play(s.lex, &c.move);
             const key = stateKey(c.board_hash, &g, c.dropped);
-            const gop = try seen.getOrPut(s.gpa, key);
-            if (gop.found_existing) continue;
-            h = try s.addHist(h, .{ .play = c.move });
+            if (seen.contains(key)) continue;
             if (g.over()) {
-                s.finished(&g, h);
+                try seen.put(s.gpa, key, {});
+                s.finished(&g, try s.addHist(h, .{ .play = c.move }));
                 continue;
             }
+            if (s.opts.per_signature != 0 and s.opts.plans.len != 0) {
+                var sig: u64 = c.dropped;
+                for (s.opts.plans, 0..) |*p, i| sig = sig *% 0x9E3779B97F4A7C15 +% (@as(u64, p.filled(&g.pos)) << 1 | @intFromBool(p.done(&g.pos))) +% i;
+                const sg = try sigs.getOrPut(s.gpa, sig);
+                if (!sg.found_existing) sg.value_ptr.* = 0;
+                if (sg.value_ptr.* >= s.opts.per_signature) continue;
+                sg.value_ptr.* += 1;
+            }
+            try seen.put(s.gpa, key, {});
+            h = try s.addHist(h, .{ .play = c.move });
             try s.layers[t].append(s.gpa, .{ .g = g, .hist = h, .board_hash = c.board_hash, .dropped = c.dropped });
         }
         s.cands[t].clearAndFree(s.gpa);
