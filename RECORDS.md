@@ -14,8 +14,8 @@ The best published result with moves, and ours.
 
 | | Collins words (SOWPODS, CSW) | North American words (OSPD, OWL, TWL, NWL) | General dictionaries |
 |---|---|---|---|
-| One player | 4,044 (Nathan Hedt, 2014)<br>ours 3,828 | none known | 4,470 (Jeff Grant, 2009) |
-| Two players | 3,674 (Clare Sudbery, 2002)<br>ours **3,816** | 4,012 (RyanM561 and TenzingHillary, 2012) | 4,207 (Jeff Grant, 1979) |
+| One player | 4,054 (Nathan Hedt, 2014)<br>ours 4,049 | none known | 4,470 (Jeff Grant, 2009) |
+| Two players | 3,674 (Clare Sudbery, 2002)<br>ours **3,844** | 4,012 (RyanM561 and TenzingHillary, 2012) | 4,207 (Jeff Grant, 1979) |
 | Single plays | 1,787 (DejMar, 2016)<br>ours 1,619 | 1,786 (Bob Lucassen, 2024) | 2,044 (Arian Smit, 2008) |
 
 ## Whole games, one player
@@ -26,9 +26,9 @@ One player plays every rack (solitaire) and chooses every draw.
 
 | Score | Tiles | Word list | By | Year | Method | Moves | Source | Notes |
 |---:|---:|---|---|---|---|---|---|---|
-| 4,054 | 100 | CSW12 | Nathan Hedt | 2014 | program | not published | [Scrabulizer comments](https://www.scrabulizer.com/blog/post/3) | reported without moves |
+| 4,054 | 100 | CSW12 | Nathan Hedt | 2014 | program | [replays](results/hedt-4054.txt) | [Scrabulizer comments](https://www.scrabulizer.com/blog/post/3) | reported without moves; his 4,044 game with the last O played as OS (worth 10, the best place for it) scores exactly this |
+| 4,049 | 100 | SOWPODS | **bingo-bot** | 2026 | beam search over Hedt's final board as targets | [replays](results/solitaire-4049-hedt-board.txt) | [this repo](#our-searches) | Hedt's board in our order of play; his own order with the last O gives 4,054 |
 | 4,044 | 99 | CSW12 | Nathan Hedt | 2014 | program | [replays](results/hedt-4044.txt) | [Scrabulizer comments](https://www.scrabulizer.com/blog/post/3) | moves as DejMar listed them, one O left over; replays with SOWPODS and CSW24; as a two-player game the order is impossible |
-| 3,828 | 100 | SOWPODS | **bingo-bot** | 2026 | beam search with lane plans | [replays](results/solitaire-3828.txt) | [this repo](#our-searches) |  |
 
 ### General dictionaries
 
@@ -45,7 +45,7 @@ Two players take turns and cooperate; the score is both totals together. Draws a
 
 | Score | Tiles | Word list | By | Year | Method | Moves | Source | Notes |
 |---:|---:|---|---|---|---|---|---|---|
-| 3,816 | 99 | SOWPODS | **bingo-bot** | 2026 | beam search with lane plans | [replays](results/two-player-3816.txt) | [this repo](#our-searches) |  |
+| 3,844 | 99 | SOWPODS | **bingo-bot** | 2026 | beam search with lane plans | [replays](results/two-player-3844.txt) | [this repo](#our-searches) |  |
 | 3,674 |  | PixiePit list (British and North American) | Clare Sudbery | 2002 | by hand | published | [PixiePit Hall of Fame](https://www.thepixiepit.co.uk/scrabble/highscores2.html) | played out with random draws; 3,658 by one player |
 
 ### North American words (OSPD, OWL, TWL, NWL)
@@ -101,6 +101,9 @@ clock for the beam that found the game; a search runs many beams.
 
 | Date | Score | Type | Word list | Plans | Search settings | Time | Machine | Commit | Game | Notes |
 |---|---:|---|---|---|---|---:|---|---|---|---|
+| 2026-11-15 | 4,049 | one player | SOWPODS | UNPROGRESSIVELY + MICROTECHNIQUES + OXYPHENBUTAZONE | beam width 512, 8 per size, blank keep 0, goal bonus 0, hooks prefix, seed 1, mid bonus 0, drop penalty 2000, target game hedt-4044.txt, target bonus 30 | 2 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [solitaire-4049-hedt-board.txt](results/solitaire-4049-hedt-board.txt) | Hedt's board in our order of play; his own order with the last O gives 4,054 |
+| 2026-11-15 | 3,864 | one player | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 128, 8 per size, blank keep 0, goal bonus 200, hooks prefix, seed 8, per signature 4, letter cost 27, mid bonus 20 | 2 min | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [solitaire-3864.txt](results/solitaire-3864.txt) |  |
+| 2026-11-15 | 3,844 | two players | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 64, 8 per size, blank keep 0, goal bonus 200, hooks prefix, seed 5, per signature 4, letter cost 27, mid bonus 20 | 87 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | 3345cae | [two-player-3844.txt](results/two-player-3844.txt) |  |
 | 2026-11-15 | 3,828 | one player | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 128, 8 per size, blank keep 0, goal bonus 200, hooks strict, seed 1, per signature 4, letter cost 27, mid bonus 20 | 90 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | d8e58bc | [solitaire-3828.txt](results/solitaire-3828.txt) |  |
 | 2026-11-15 | 3,816 | two players | SOWPODS | MICROTECHNIQUES + UNPROGRESSIVELY + OXYPHENBUTAZONE | beam width 64, 8 per size, blank keep 0, goal bonus 200, hooks strict, seed 4, per signature 4, letter cost 27, mid bonus 20 | 45 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | d8e58bc | [two-player-3816.txt](results/two-player-3816.txt) |  |
 | 2026-11-15 | 3,693 | one player | SOWPODS | OXYPHENBUTAZONE + SESQUISULPHIDES | beam width 128, 8 per size, blank keep 0, hooks strict, seed 2, letter cost 27 | 47 s | 4 threads, Intel Xeon @ 2.10GHz (cloud container) | ca8352b | [solitaire-3693.txt](results/solitaire-3693.txt) |  |
