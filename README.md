@@ -13,7 +13,8 @@ Best found so far (SOWPODS, full rules, two blanks): 3,828 in solitaire and
 3,816 for two cooperating players, both in `results/` (see Search). The
 best single play found is OXYPHENBUTAZONE for 1,619. The record with
 tournament (Collins) words is Nathan Hedt's 4,044 from 99 tiles (2014);
-our engine replays it exactly (`results/hedt-4044.txt`).
+our engine replays it exactly (`results/hedt-4044.txt`). Every record we
+know of, by type and word list, is in [RECORDS.md](RECORDS.md).
 
 `solver.py` is the 2023 Python experiment. It is kept unchanged as the
 reference implementation and the performance baseline. `src/` is the Zig
@@ -34,6 +35,7 @@ The first command that needs the lexicon builds `sowpods.gaddag` from
     zig-out/bin/bingo plans --lane row0 --top 20                     # candidate 15-letter plays
     zig-out/bin/bingo rollout --games 1000 --seed 1 --out best.txt   # 2023 policy, all cores
     zig-out/bin/bingo check --game best.txt                          # replay with real racks and draws
+    zig-out/bin/bingo html --game best.txt --out best.html           # a page that replays it on a board
     zig-out/bin/bingo show --game best.txt --turns 10                # the board after 10 turns
     zig-out/bin/bingo moves --game best.txt --turns 10               # every legal play there
     zig-out/bin/bingo bench --game bench/game-full.txt               # timing per turn
@@ -52,6 +54,30 @@ A game file has one turn per line: `ROW COL across|down WORD` (blanks
 written as lower-case letters) or `pass`. Players alternate. Rule options:
 `--players 1|2` (default 2), `--blanks N` (default 2), `--end wespa|naspa`
 (default wespa). `solver.py`'s rules are `--players 1 --blanks 0`.
+
+`bingo html` writes one self-contained page that plays games out on a
+board, one move at a time: arrow keys step, space plays and pauses, and
+the move list jumps to any turn. Pass `--game` once per game (up to 8) to
+choose between them on the page. It needs no network: the page carries
+the moves, scores and words.
+
+### Records
+
+[RECORDS.md](RECORDS.md) lists the best published games and plays by type
+(one player, two players, single play) and word list (Collins, North
+American, general dictionaries), with ours beside them and a log of every
+saved search. It is generated from `records.csv`, so edit that and run
+
+    python3 tools/records.py
+
+After a search saves a game, log it with
+
+    python3 tools/records.py add results/new-game.txt
+
+which replays the game with `bingo check` (so the score is checked, not
+copied), takes the settings, word list and search time from the file's
+header, adds the machine and commit, and regenerates the page. `--play`
+logs the game's best single play instead, and `--note TEXT` adds a note.
 
 ### Running on many cores
 
@@ -323,39 +349,8 @@ bottom-row word) and allows 4-letter setup runs on the edges by default
 
 ### Published records
 
-Whole games, with chosen draws unless noted:
-
-| score | tiles | word list | big words | source |
-|---:|---|---|---|---|
-| 3,108 | | | | Darryl Francis, *Word Ways* 1972 |
-| 4,047 | | general dictionaries | BENZOXYCAMPHORS | Ron Jerome, *Word Ways* 1974 |
-| 4,142 | | general dictionaries | BENZOXYCAMPHORS | Ralph Beaman, *Word Ways* 1974 |
-| 4,207 | 99, two players | general dictionaries | BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1979 |
-| 4,454 | 100, solitaire | Webster's 2nd and 3rd, the OED | FREQUENTATIVELY, JACKPUDDINGHOOD, BENZOXYCAMPHORS | Jeff Grant, *Word Ways* 1981 |
-| 4,470 | 100, solitaire | as above | | Jeff Grant, *Word Ways* 2009 |
-| 3,986 | 99, two players | OSPD and Webster's Tenth (all in TWL06) | MICROTECHNIQUES, OVERIDENTIFYING, OXYPHENBUTAZONE | Stephen Root and Nathan Hedt, *Word Ways* 2003 |
-| 3,674 | two players, random draws | | | Clare Sudbery, PixiePit 2002 (3,658 by one player) |
-| 3,995 by one player, 4,012 together | 99, two players | TWL06 (Facebook Scrabble) | as Root and Hedt | RyanM561 and TenzingHillary, Scrabulizer comments 2012, played out |
-| 4,044 | 99, one rack | CSW12 | MICROTECHNIQUES, UNPROGRESSIVELY, OXYPHENBUTAZONE | Nathan Hedt, 2014, Al Zimmermann's contest |
-| 4,054 | 100 | CSW12 | | Nathan Hedt, 2014, reported without moves |
-
-Single plays:
-
-| score | word list | method | source |
-|---:|---|---|---|
-| 2,037 | general dictionaries (SESQUIOXIDIZING) | by hand | Josefa Heifetz, *Word Ways* 1974 |
-| 2,044 | SOWPODS plus SESQUIOXIDIZING | by hand | Arian Smit, Scrabulizer 2008 |
-| 1,778 | OWL and the Long Words List | by hand | Dan Stock, rec.games.board.scrabble FAQ |
-| 1,780 | TWL06 | by hand | Arian Smit, Scrabulizer 2008 |
-| 1,783 | TWL06 | program that found nothing higher for TWL06 | Kyle Cronan, Scrabulizer comments 2011 |
-| 1,784 | NASPA list | by hand | "Jodi and Eric", NASPA wiki |
-| 1,785 | SOWPODS | by hand | Arian Smit, Scrabulizer 2008 |
-| 1,786 | NWL23 | SAT solver, proved best for NWL23 | Bob Lucassen, Woogles blog 2024 |
-| 1,787 | CSW15 | by hand | DejMar, Scrabulizer comments 2016 |
-
-A 1,791 SOWPODS play was also claimed (Ben Woo, 2011) without a board, and
-its arithmetic does not check: OECUMENICAL through a triple-word square is
-worth 51, not 66.
+The published records, with their word lists, methods and sources, are in
+[RECORDS.md](RECORDS.md). The notes below are about how they were made.
 
 The record plays are all OXYPHENBUTAZONE across an edge with seven hooks.
 Dan Stock's: (54 x 27 = 1,458) + 50 + OPACIFYING 63 + BRAINWASHING 63 +
@@ -366,9 +361,9 @@ Lucassen's SAT solver) and once on whole games: Al Zimmermann's 2014
 programming contest "Alphabet City Light" asked for the highest combined
 score. Hedt won it with 4,037 (4,032 from 99 tiles) and later reached
 4,044 from 99 tiles (4,054 with all 100); the runner-up scored 4,026 with
-TWL words. The other game
-records were built and then tuned by hand: the Facebook record went 3,953,
-3,962, 3,966, 3,969, 3,983, 3,986, 3,995 between 2009 and 2012.
+TWL words. The other game records were built and then tuned by hand: the
+Facebook record went 3,953, 3,962, 3,966, 3,969, 3,983, 3,986, 3,995
+between 2009 and 2012.
 
 `results/hedt-4044.txt` is Hedt's game as DejMar transcribed it in the
 Scrabulizer thread. It replays under `bingo check --players 1` with both
@@ -382,8 +377,8 @@ out, yet OB has to follow it.
 Where that leaves us. In solitaire our 3,828 is 216 points short of Hedt's
 4,044. For two players our 3,816 beats the 3,674 SOWPODS game, but the
 Facebook game (4,012 together, with TWL06 words, nearly all of which are
-in Collins) is 196 points ahead. Our best single play, 1,619, is about 170 points short
-of the Collins records; the gap is hooks.
+in Collins) is 196 points ahead. Our best single play, 1,619, is about
+170 points short of the Collins records; the gap is hooks.
 
 What limits the search now:
 

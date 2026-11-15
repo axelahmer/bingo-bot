@@ -1,6 +1,6 @@
-# Nathan Hedt's game as listed by DejMar in the Scrabulizer thread: 4,044 points
-# from 99 tiles, one O left. A one-rack (solitaire) game; as a two-player game
-# the order cannot work (whoever plays OXYPHENBUTAZONE would go out at once).
+# Nathan Hedt's game: 4,044 points from 99 tiles (1 player, 2 blanks, wespa), as listed by
+# DejMar in the Scrabulizer thread; words sowpods.txt or csw24.txt. One O is left over.
+# Two players could not play this order: whoever plays OXYPHENBUTAZONE would go out at once.
 7 1 across LAWLIKE
 6 1 down ALIEnAGE
 2 7 down PROGRESS

@@ -1,0 +1,240 @@
+<title>Scrabble Record Replays</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap">
+<style>
+/* Board on the left, the move list beside it; one column on phones. */
+:root {
+  --bg: #eef1f3; --panel: #ffffff; --ink: #1c2227; --muted: #5d6973; --line: #d4dbe0;
+  --sq: #c9d6d0; --sq-ink: #4c5a55;
+  --tw: #c64a3f; --dw: #eaa9a2; --tl: #336fb3; --dl: #a5c9e6; --prem-ink: #ffffff; --prem-ink-soft: #3b2a2a;
+  --tile: #f1e2bf; --tile-ink: #2a2117; --tile-blank: #8a6a35; --tile-edge: #d2bf92;
+  --accent: #df9414; --sel: #fff1d2;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161a; --panel: #192026; --ink: #e5eaee; --muted: #94a1ab; --line: #2a333b;
+    --sq: #26332e; --sq-ink: #9db3aa;
+    --tw: #b3463c; --dw: #8a4a46; --tl: #2d5d95; --dl: #3b6584; --prem-ink: #f3f5f7; --prem-ink-soft: #f1dcda;
+    --tile: #e7d6ae; --tile-ink: #241b11; --tile-blank: #7d5f2c; --tile-edge: #b9a476;
+    --accent: #f0b23a; --sel: #2b2a1d; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161a; --panel: #192026; --ink: #e5eaee; --muted: #94a1ab; --line: #2a333b;
+  --sq: #26332e; --sq-ink: #9db3aa;
+  --tw: #b3463c; --dw: #8a4a46; --tl: #2d5d95; --dl: #3b6584; --prem-ink: #f3f5f7; --prem-ink-soft: #f1dcda;
+  --tile: #e7d6ae; --tile-ink: #241b11; --tile-blank: #7d5f2c; --tile-edge: #b9a476;
+  --accent: #f0b23a; --sel: #2b2a1d; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-ui);
+  padding-block: 20px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+h1 { font-family: var(--font-display); font-size: 1.5rem; margin: 0; text-wrap: balance; }
+select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); max-width: 100%; }
+.about { color: var(--muted); font-size: 0.85rem; flex-basis: 100%; min-width: 0; }
+.about summary { cursor: pointer; width: fit-content; }
+.about p { margin: 6px 0 0; overflow-wrap: anywhere; }
+.main { display: grid; grid-template-columns: minmax(0, 600px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 860px) { .main { grid-template-columns: minmax(0, 1fr); } }
+
+.board { container-type: inline-size; display: grid; grid-template-columns: 4% repeat(15, 1fr); gap: 2px; width: 100%; max-width: 600px; }
+.coord { display: grid; place-items: center; color: var(--muted); font-size: 2.2cqw; font-variant-numeric: tabular-nums; }
+.sq { aspect-ratio: 1; max-width: 100%; border-radius: 3px; background: var(--sq); color: var(--sq-ink); display: grid; place-items: center; position: relative; font-size: 2.1cqw; font-weight: 600; letter-spacing: 0.02em; }
+.sq.tw { background: var(--tw); color: var(--prem-ink); }
+.sq.tl { background: var(--tl); color: var(--prem-ink); }
+.sq.dw { background: var(--dw); color: var(--prem-ink-soft); }
+.sq.dl { background: var(--dl); color: var(--prem-ink-soft); }
+.tile { position: absolute; inset: 0; border-radius: 3px; background: var(--tile); color: var(--tile-ink); box-shadow: inset 0 -2px 0 var(--tile-edge); display: grid; place-items: center; font-family: var(--font-display); font-weight: 700; font-size: 4.1cqw; }
+.tile sub { position: absolute; right: 8%; bottom: 4%; font-size: 1.8cqw; font-weight: 500; }
+.tile.blank { color: var(--tile-blank); }
+.tile.now { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.side { display: grid; gap: 12px; min-width: 0; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; min-width: 0; }
+.turnline { color: var(--muted); font-size: 0.85rem; }
+.word { font-family: var(--font-display); font-size: 1.6rem; font-weight: 700; letter-spacing: 0.04em; overflow-wrap: anywhere; }
+.word .b { color: var(--tile-blank); }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+.meta b { font-weight: 600; }
+.also { font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; }
+.totals { font-variant-numeric: tabular-nums; font-size: 0.95rem; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+button { font: inherit; font-size: 0.9rem; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button:focus-visible, select:focus-visible, input:focus-visible, tr:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.play { background: var(--accent); border-color: var(--accent); color: #1c1606; font-weight: 600; min-width: 5.5em; }
+input[type=range] { flex: 1 1 160px; accent-color: var(--accent); }
+.list { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 8px; text-align: left; white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); }
+td.n { text-align: right; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--sel); }
+tr.cur { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+.big td { font-weight: 600; }
+.keys { color: var(--muted); font-size: 0.8rem; margin: 0; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1 id="title">Scrabble record replays</h1>
+    <select id="game" aria-label="Game"></select>
+    <details class="about"><summary>About this game</summary><p id="about"></p></details>
+  </header>
+  <div class="main">
+    <div class="board" id="board" aria-label="Board"></div>
+    <div class="side">
+      <div class="panel" aria-live="polite">
+        <div class="turnline" id="turnline"></div>
+        <div class="word" id="word"></div>
+        <div class="meta" id="meta"></div>
+        <div class="also" id="also"></div>
+        <div class="totals" id="totals"></div>
+      </div>
+      <div class="controls">
+        <button id="first" aria-label="First turn">&#9198;</button>
+        <button id="prev" aria-label="Previous turn">&#9664;</button>
+        <button id="play" class="play">Play</button>
+        <button id="next" aria-label="Next turn">&#9654;</button>
+        <button id="last" aria-label="Last turn">&#9197;</button>
+        <input id="step" type="range" min="0" max="0" value="0" aria-label="Turn">
+      </div>
+      <p class="keys">Arrow keys step through the turns, space plays and pauses.</p>
+      <div class="list">
+        <table>
+          <thead><tr><th>#</th><th>who</th><th>play</th><th>at</th><th>&times;</th><th class="n">score</th><th class="n">total</th></tr></thead>
+          <tbody id="moves"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const GAMES = /*GAMES*/[];
+const N = 15;
+const LAYOUT = ["T..d...T...d..T", ".D...t...t...D.", "..D...d.d...D..", "d..D...d...D..d", "....D.....D....", ".t...t...t...t.", "..d...d.d...d..", "T..d...D...d..T", "..d...d.d...d..", ".t...t...t...t.", "....D.....D....", "d..D...d...D..d", "..D...d.d...D..", ".D...t...t...D.", "T..d...T...d..T"];
+const PREM = { T: ["tw", "TW"], D: ["dw", "DW"], t: ["tl", "TL"], d: ["dl", "DL"] };
+const VALUE = { A: 1, B: 3, C: 3, D: 2, E: 1, F: 4, G: 2, H: 4, I: 1, J: 8, K: 5, L: 1, M: 3, N: 1, O: 1, P: 3, Q: 10, R: 1, S: 1, T: 1, U: 1, V: 4, W: 4, X: 8, Y: 4, Z: 10 };
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => n.toLocaleString("en-US");
+let gi = 0, k = 0, timer = null;
+const cells = [];
+
+function buildBoard() {
+  const b = $("board");
+  b.append(document.createElement("div"));
+  for (let c = 0; c < N; c++) { const d = document.createElement("div"); d.className = "coord"; d.textContent = String.fromCharCode(65 + c); b.append(d); }
+  for (let r = 0; r < N; r++) {
+    const lab = document.createElement("div"); lab.className = "coord"; lab.textContent = r + 1; b.append(lab);
+    for (let c = 0; c < N; c++) {
+      const sq = document.createElement("div");
+      const p = PREM[LAYOUT[r][c]];
+      sq.className = "sq" + (p ? " " + p[0] : "");
+      sq.textContent = r === 7 && c === 7 ? "★" : p ? p[1] : "";
+      b.append(sq); cells.push(sq);
+    }
+  }
+}
+
+function wordHtml(w) {
+  return [...w].map((ch) => ch === ch.toLowerCase() ? `<span class="b">${ch.toUpperCase()}</span>` : ch).join("");
+}
+
+function loadGame(i) {
+  gi = i;
+  const g = GAMES[i];
+  $("about").textContent = g.about;
+  const rows = g.turns.map((t, j) => {
+    const big = t.mult >= 9 ? " big" : "";
+    const play = t.pass ? "pass" : t.words[0].toUpperCase();
+    return `<tr data-k="${j + 1}" class="${big}"><td>${j + 1}</td><td>p${t.p + 1}</td><td>${play}</td><td>${t.at || ""}</td><td>${t.mult > 1 ? t.mult : ""}</td><td class="n">${t.pass ? "" : t.score}</td><td class="n">${fmt(t.totals[0] + t.totals[1])}</td></tr>`;
+  });
+  $("moves").innerHTML = rows.join("");
+  $("step").max = g.turns.length;
+  show(g.turns.length);
+}
+
+function show(step) {
+  const g = GAMES[gi];
+  k = Math.max(0, Math.min(step, g.turns.length));
+  const at = new Array(N * N).fill(null);
+  for (let j = 0; j < k; j++) {
+    const t = g.turns[j];
+    if (t.pass) continue;
+    for (const [r, c, l, blank] of t.tiles) at[r * N + c] = { l, blank, now: j === k - 1 };
+  }
+  cells.forEach((sq, i) => {
+    const old = sq.querySelector(".tile");
+    if (old) old.remove();
+    const x = at[i];
+    if (!x) return;
+    const t = document.createElement("span");
+    t.className = "tile" + (x.blank ? " blank" : "") + (x.now ? " now" : "");
+    t.innerHTML = x.l + (x.blank ? "" : `<sub>${VALUE[x.l]}</sub>`);
+    sq.append(t);
+  });
+  $("step").value = k;
+  document.querySelectorAll("#moves tr").forEach((tr) => tr.classList.toggle("cur", Number(tr.dataset.k) === k));
+  const cur = document.querySelector("#moves tr.cur");
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+  const total = (s) => g.players === 2 ? `p1 ${fmt(s[0])} + p2 ${fmt(s[1])} = ${fmt(s[0] + s[1])}` : fmt(s[0]);
+  if (k === 0) {
+    $("turnline").textContent = `${g.turns.length} turns`;
+    $("word").textContent = "Empty board";
+    $("meta").textContent = ""; $("also").textContent = "";
+    $("totals").textContent = "";
+    return;
+  }
+  const t = g.turns[k - 1];
+  $("turnline").textContent = `Turn ${k} of ${g.turns.length}, player ${t.p + 1}, rack ${t.rack || "empty"}`;
+  if (t.pass) {
+    $("word").textContent = "Pass";
+    $("meta").textContent = ""; $("also").textContent = "";
+  } else {
+    $("word").innerHTML = wordHtml(t.words[0]);
+    $("meta").innerHTML = `<span><b>${t.score}</b> points</span><span>${t.at} ${t.dir ? "down" : "across"}</span>` +
+      (t.mult > 1 ? `<span>word &times;${t.mult}</span>` : "") + `<span>${t.tiles.length} tile${t.tiles.length > 1 ? "s" : ""}${t.tiles.length === 7 ? ", bingo" : ""}</span>`;
+    $("also").innerHTML = t.words.length > 1 ? "Also formed: " + t.words.slice(1).map(wordHtml).join(", ") : "";
+  }
+  $("totals").textContent = "Total " + total(t.totals) + (k === g.turns.length ? `. ${g.end}` : "");
+}
+
+function stop() { if (timer) { clearInterval(timer); timer = null; } $("play").textContent = "Play"; }
+function play() {
+  if (timer) return stop();
+  if (k >= GAMES[gi].turns.length) show(0);
+  $("play").textContent = "Pause";
+  timer = setInterval(() => { if (k >= GAMES[gi].turns.length) return stop(); show(k + 1); }, 900);
+}
+
+buildBoard();
+GAMES.forEach((g, i) => { const o = document.createElement("option"); o.value = i; o.textContent = `${g.name} (${fmt(g.total)})`; $("game").append(o); });
+$("game").hidden = GAMES.length < 2;
+$("game").addEventListener("change", (e) => { stop(); loadGame(Number(e.target.value)); });
+$("first").onclick = () => { stop(); show(0); };
+$("prev").onclick = () => { stop(); show(k - 1); };
+$("next").onclick = () => { stop(); show(k + 1); };
+$("last").onclick = () => { stop(); show(GAMES[gi].turns.length); };
+$("play").onclick = play;
+$("step").addEventListener("input", (e) => { stop(); show(Number(e.target.value)); });
+$("moves").addEventListener("click", (e) => { const tr = e.target.closest("tr"); if (tr) { stop(); show(Number(tr.dataset.k)); } });
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.key === "ArrowRight") { stop(); show(k + 1); }
+  else if (e.key === "ArrowLeft") { stop(); show(k - 1); }
+  else if (e.key === "Home") { stop(); show(0); }
+  else if (e.key === "End") { stop(); show(GAMES[gi].turns.length); }
+  else if (e.key === " ") { e.preventDefault(); play(); }
+  else return;
+});
+if (GAMES.length) loadGame(0);
+</script>

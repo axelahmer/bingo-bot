@@ -30,6 +30,7 @@ const usage =
     \\            third on row 7, and beam-search each
     \\  rollout   play games with the 2023 annealed-softmax policy
     \\  check     replay a game under the full rules with real racks and draws
+    \\  html      write a page that replays one or more games (--game, repeatable)
     \\  show      print the position after a game's turns
     \\  moves     list every legal play for the player to move
     \\  bench     time move generation at each turn of a game
@@ -44,7 +45,8 @@ const usage =
     \\options:
     \\  --words PATH    word list (default sowpods.txt)
     \\  --cache PATH    GADDAG cache file (default sowpods.gaddag, "none" to skip)
-    \\  --game PATH     a game: one turn per line, "ROW COL across|down WORD" or "pass"
+    \\  --game PATH     a game: one turn per line, "ROW COL across|down WORD" or "pass";
+    \\                  a header comment such as "(1 player, ...)" sets --players
     \\  --turns K       use only the first K turns of --game
     \\  --blank-use U   any (default) or needed: generate blank plays only where
     \\                  no natural tile is left
@@ -97,6 +99,11 @@ const Options = struct {
     words: []const u8 = "sowpods.txt",
     cache: []const u8 = "sowpods.gaddag",
     game: ?[]const u8 = null,
+    /// Every --game given (html shows them all).
+    game_list: [8][]const u8 = undefined,
+    n_games: usize = 0,
+    /// --players was given (otherwise a game file's header may set it).
+    players_set: bool = false,
     turns: ?usize = null,
     rules: rules.Rules = .{},
     blank_use: movegen.BlankMode = .any,
@@ -149,11 +156,15 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             o.cache = v;
         } else if (std.mem.eql(u8, a, "--game")) {
             o.game = v;
+            if (o.n_games == o.game_list.len) return error.Usage;
+            o.game_list[o.n_games] = v;
+            o.n_games += 1;
         } else if (std.mem.eql(u8, a, "--turns")) {
             o.turns = try std.fmt.parseInt(usize, v, 10);
         } else if (std.mem.eql(u8, a, "--players")) {
             o.rules.players = try std.fmt.parseInt(u8, v, 10);
             if (o.rules.players != 1 and o.rules.players != 2) return error.Usage;
+            o.players_set = true;
         } else if (std.mem.eql(u8, a, "--blanks")) {
             o.rules.blanks = try std.fmt.parseInt(u8, v, 10);
         } else if (std.mem.eql(u8, a, "--end")) {
@@ -225,10 +236,11 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const opts = parseArgs(args) catch {
+    var opts = parseArgs(args) catch {
         std.debug.print("{s}", .{usage});
         std.process.exit(2);
     };
+    opts = withFileRules(gpa, io, opts);
 
     var out_buf: [1 << 16]u8 = undefined;
     var out_file: Io.File.Writer = .init(.stdout(), io, &out_buf);
@@ -266,6 +278,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdPlans(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "search")) {
         try cmdSearch(gpa, io, &lex, opts, out);
+    } else if (std.mem.eql(u8, cmd, "html")) {
+        try cmdHtml(gpa, io, &lex, opts, out);
     } else if (std.mem.eql(u8, cmd, "verify")) {
         try cmdVerify(gpa, io, &lex, opts, out);
     } else {
@@ -753,7 +767,7 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
         const t = &tasks[pool.best_task];
         try out.print("\nbest {d} (seed {d}, best play {d}):\n", .{ pool.best_total, t.seed, bestPlay(pool.best_turns) });
         try writeTurns(out, lex, &start, pool.best_turns, true);
-        if (opts.out) |path| try writeGameFile(io, lex, opts, path, prefix.items, &start, pool.best_turns, t.plans[0..t.n_plans], t.seed, pool.best_total);
+        if (opts.out) |path| try writeGameFile(io, lex, opts, path, prefix.items, &start, pool.best_turns, t.plans[0..t.n_plans], t.seed, pool.best_total, pool.best_seconds);
         return;
     }
     var one = base;
@@ -773,7 +787,7 @@ fn cmdBeam(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.
     try writeTurns(out, lex, &start, res.turns, true);
     try best.pos.writeBoard(out);
     try writeSummary(out, &best);
-    if (opts.out) |path| try writeGameFile(io, lex, opts, path, prefix.items, &start, res.turns, plans[0..opts.n_plans], opts.seed, best.total());
+    if (opts.out) |path| try writeGameFile(io, lex, opts, path, prefix.items, &start, res.turns, plans[0..opts.n_plans], opts.seed, best.total(), res.seconds);
 }
 
 /// Beam options from the command line (plans and seed are set per search).
@@ -796,7 +810,7 @@ fn beamOptions(opts: Options, aff: ?*const affix.Affixes, threads: usize) beam.O
 }
 
 /// Write a game found by beam search, with a header saying how to find it again.
-fn writeGameFile(io: Io, lex: *const Lexicon, opts: Options, path: []const u8, prefix: []const Turn, start: *const Game, turns: []const Turn, plans: []const planmod.Plan, seed: u64, total: i32) !void {
+fn writeGameFile(io: Io, lex: *const Lexicon, opts: Options, path: []const u8, prefix: []const Turn, start: *const Game, turns: []const Turn, plans: []const planmod.Plan, seed: u64, total: i32, seconds: f64) !void {
     var file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     var buf: [4096]u8 = undefined;
@@ -819,7 +833,9 @@ fn writeGameFile(io: Io, lex: *const Lexicon, opts: Options, path: []const u8, p
         try w.writeAll(", plan ");
         try planmod.write(pl, w);
     }
-    try w.print(": {d} points ({d} players, {d} blanks, {s})\n", .{ total, r.players, r.blanks, @tagName(r.end_rule) });
+    try w.print(": {d} points ({d} player{s}, {d} blanks, {s}); words {s}; search {d:.1} s\n", .{
+        total, r.players, if (r.players == 1) "" else "s", r.blanks, @tagName(r.end_rule), std.fs.path.basename(opts.words), seconds,
+    });
     try writeTurns(w, lex, &Game.init(r), prefix, false);
     try writeTurns(w, lex, start, turns, false);
     try w.flush();
@@ -850,6 +866,7 @@ const Pool = struct {
     best_total: i32 = std.math.minInt(i32),
     best_task: usize = 0,
     best_turns: []game.Turn = &.{},
+    best_seconds: f64 = 0,
     failed: ?anyerror = null,
 
     /// Run every task, `jobs` at a time, splitting `threads` between them.
@@ -917,6 +934,7 @@ const Pool = struct {
             res.turns = &.{};
             p.best_total = total;
             p.best_task = i;
+            p.best_seconds = res.seconds;
         }
     }
 };
@@ -938,6 +956,173 @@ fn bestPlay(turns: []const Turn) i32 {
         .pass => {},
     };
     return best;
+}
+
+/// Players named in a game file's leading comment lines ("1 player",
+/// "2 players"), if any.
+fn headerPlayers(text: []const u8) ?u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or line[0] != '#') break;
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, line, from, " player")) |k| {
+            if (k > 0 and (line[k - 1] == '1' or line[k - 1] == '2') and (k < 2 or !std.ascii.isDigit(line[k - 2]))) return line[k - 1] - '0';
+            from = k + 1;
+        }
+    }
+    return null;
+}
+
+/// Unless --players was given, play a game file under the player count its
+/// header names.
+fn withFileRules(gpa: Allocator, io: Io, opts: Options) Options {
+    var o = opts;
+    const path = o.game orelse return o;
+    if (o.players_set) return o;
+    const text = Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return o;
+    defer gpa.free(text);
+    if (headerPlayers(text)) |p| o.rules.players = p;
+    return o;
+}
+
+fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |ch| switch (ch) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '<' => try w.writeAll("\\u003c"),
+        0...0x1f => try w.print("\\u{x:0>4}", .{ch}),
+        else => try w.writeByte(ch),
+    };
+    try w.writeByte('"');
+}
+
+/// Board cells as a JSON string: letters, lower case for blanks.
+fn writeJsonCells(w: *Io.Writer, cells: []const u8) !void {
+    try w.writeByte('"');
+    for (cells) |c| try w.writeByte(board.cellChar(c));
+    try w.writeByte('"');
+}
+
+/// One game as JSON for the viewer: every turn with its rack, tiles,
+/// words, score and the running totals.
+fn writeGameJson(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, path: []const u8, w: *Io.Writer) !void {
+    var turns: std.ArrayList(Turn) = .empty;
+    defer turns.deinit(gpa);
+    _ = try loadGame(gpa, io, lex, opts, &turns);
+    const realized = try gpa.create(game.Realized);
+    defer gpa.destroy(realized);
+    const r = opts.rules;
+    const g = try game.realize(lex, r, turns.items, realized);
+    const text = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
+    defer gpa.free(text);
+    var about: []const u8 = "";
+    if (std.mem.startsWith(u8, text, "#")) {
+        const eol = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+        about = std.mem.trim(u8, text[1..eol], " \t\r");
+    }
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, std.fs.path.basename(path));
+    try w.writeAll(",\"about\":");
+    try writeJsonString(w, about);
+    try w.print(",\"players\":{d},\"total\":{d},\"turns\":[", .{ r.players, g.total() });
+    var replay = Game.init(r);
+    for (turns.items, 0..) |*t, k| {
+        if (k > 0) try w.writeByte(',');
+        var rbuf: [64]u8 = undefined;
+        var rw = Io.Writer.fixed(&rbuf);
+        try writeRack(&rw, &realized.rack_before[k]);
+        try w.print("{{\"p\":{d},\"rack\":", .{replay.turn});
+        try writeJsonString(w, std.mem.trim(u8, rw.buffered(), " "));
+        switch (t.*) {
+            .play => |*m| {
+                var wm: u32 = 1;
+                var it = m.new_mask;
+                while (it != 0) : (it &= it - 1) wm *= rules.premiums.word[m.dir][@as(usize, m.line) * N + @ctz(it)];
+                const col: u8 = 'A' + (if (m.dir == 0) m.start else m.line);
+                const row: usize = 1 + @as(usize, if (m.dir == 0) m.line else m.start);
+                try w.print(",\"score\":{d},\"mult\":{d},\"dir\":{d},\"at\":", .{ m.score, wm, m.dir });
+                var abuf: [8]u8 = undefined;
+                const at = if (m.dir == 0) try std.fmt.bufPrint(&abuf, "{d}{c}", .{ row, col }) else try std.fmt.bufPrint(&abuf, "{c}{d}", .{ col, row });
+                try writeJsonString(w, at);
+                try w.writeAll(",\"tiles\":[");
+                var first = true;
+                it = m.new_mask;
+                while (it != 0) : (it &= it - 1) {
+                    const i: usize = @ctz(it);
+                    if (!first) try w.writeByte(',');
+                    first = false;
+                    try w.print("[{d},{d},\"{c}\",{d}]", .{ m.row(i), m.col(i), @as(u8, rules.letterOf(m.tiles[i])) + 'A', @intFromBool(rules.isBlank(m.tiles[i])) });
+                }
+                replay.play(lex, m);
+                // The main word, then the cross words the new tiles made.
+                try w.writeAll("],\"words\":[");
+                try writeJsonCells(w, replay.pos.cells[m.dir][@as(usize, m.line) * N ..][m.start .. @as(usize, m.end) + 1]);
+                it = m.new_mask;
+                while (it != 0) : (it &= it - 1) {
+                    const i: usize = @ctz(it);
+                    const run = replay.pos.cells[1 - m.dir][i * N ..][0..N];
+                    var lo: usize = m.line;
+                    while (lo > 0 and run[lo - 1] != 0) lo -= 1;
+                    var hi: usize = m.line;
+                    while (hi + 1 < N and run[hi + 1] != 0) hi += 1;
+                    if (hi == lo) continue;
+                    try w.writeByte(',');
+                    try writeJsonCells(w, run[lo .. hi + 1]);
+                }
+                try w.writeByte(']');
+            },
+            .pass => {
+                try w.writeAll(",\"pass\":true");
+                replay.pass();
+            },
+        }
+        try w.print(",\"totals\":[{d},{d}]}}", .{ replay.score[0], replay.score[1] });
+    }
+    try w.writeAll("],\"end\":");
+    var ebuf: [160]u8 = undefined;
+    const end = switch (g.end) {
+        .none => try std.fmt.bufPrint(&ebuf, "{d} tile{s} not played", .{ g.pos.pool_total, if (g.pos.pool_total == 1) "" else "s" }),
+        .went_out => try std.fmt.bufPrint(&ebuf, "Player {d} went out (end adjustment {d}, {d})", .{ @as(u8, g.turn) + 1, g.adjust[0], g.adjust[1] }),
+        .scoreless => try std.fmt.bufPrint(&ebuf, "Ended after {d} scoreless turns", .{g.rules.scoreless_limit}),
+    };
+    try writeJsonString(w, end);
+    try w.writeByte('}');
+}
+
+/// A page that replays the games (one per --game): the viewer template
+/// with the games' turns written in as data.
+fn cmdHtml(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
+    if (opts.n_games == 0) return error.Usage;
+    var data: Io.Writer.Allocating = .init(gpa);
+    defer data.deinit();
+    try data.writer.writeByte('[');
+    for (opts.game_list[0..opts.n_games], 0..) |path, i| {
+        var o = opts;
+        o.game = path;
+        o = withFileRules(gpa, io, o);
+        if (i > 0) try data.writer.writeByte(',');
+        try writeGameJson(gpa, io, lex, o, path, &data.writer);
+    }
+    try data.writer.writeByte(']');
+    const template = @embedFile("viewer.html");
+    const marker = "/*GAMES*/[]";
+    const at = std.mem.indexOf(u8, template, marker) orelse return error.BadTemplate;
+    var file: ?Io.File = null;
+    defer if (file) |f| f.close(io);
+    var buf: [1 << 14]u8 = undefined;
+    var fw: Io.File.Writer = undefined;
+    var w = out;
+    if (opts.out) |p| {
+        file = try Io.Dir.cwd().createFile(io, p, .{});
+        fw = file.?.writer(io, &buf);
+        w = &fw.interface;
+    }
+    try w.writeAll("<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n");
+    try w.writeAll(template[0..at]);
+    try w.writeAll(data.written());
+    try w.writeAll(template[at + marker.len ..]);
+    try w.flush();
 }
 
 fn cmdPlans(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *Io.Writer) !void {
@@ -1111,7 +1296,7 @@ fn cmdSearch(gpa: Allocator, io: Io, lex: *const Lexicon, opts: Options, out: *I
     const best = &tasks.items[pool.best_task];
     try out.print("\nbest {d} (seed {d}, best play {d}):\n", .{ pool.best_total, best.seed, bestPlay(pool.best_turns) });
     try writeTurns(out, lex, &start, pool.best_turns, true);
-    if (opts.out) |path| try writeGameFile(io, lex, opts, path, &.{}, &start, pool.best_turns, best.plans[0..best.n_plans], best.seed, pool.best_total);
+    if (opts.out) |path| try writeGameFile(io, lex, opts, path, &.{}, &start, pool.best_turns, best.plans[0..best.n_plans], best.seed, pool.best_total, pool.best_seconds);
 }
 
 /// The setup squares form one unbroken run (as PROGRESS in UNPROGRESSIVELY).
